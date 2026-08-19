@@ -1,0 +1,36 @@
+[project]
+name = "super-codex"
+version = "0.1.0"
+description = "A Codex-first account and workspace control plane for coding agents"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{name = "Super Codex contributors"}]
+keywords = ["codex", "claude", "coding-agent", "cli", "multi-account"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+  "Topic :: Utilities",
+]
+dependencies = []
+
+[project.scripts]
+sc = "super_agent.cli:main"
+super-codex = "super_agent.cli:main"
+
+[build-system]
+requires = ["flit_core==3.12.0"]
+build-backend = "flit_core.buildapi"
+
+[tool.flit.module]
+name = "super_agent"

@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.dist-info/
+.venv*/
+build/
+dist/
+.coverage
+htmlcov/
+.DS_Store
+.schema-probe/
+.test-state/
