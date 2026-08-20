@@ -70,6 +70,24 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(result["installType"], "index")
         self.assertIsNone(result["source"])
 
+    @patch("super_agent.provenance.metadata.distribution")
+    @patch("super_agent.provenance.standalone_metadata")
+    def test_standalone_metadata_takes_precedence(self, build_metadata, distribution):
+        build_metadata.return_value = {
+            "installType": "standalone-release",
+            "version": "1.2.3",
+            "tag": "v1.2.3",
+            "commit": "abc123",
+            "source": "https://github.com/driwand/super-codex/releases/tag/v1.2.3",
+        }
+
+        result = installation_provenance()
+
+        self.assertEqual(result["installType"], "standalone-release")
+        self.assertEqual(result["requestedRevision"], "v1.2.3")
+        self.assertEqual(result["commit"], "abc123")
+        distribution.assert_not_called()
+
     @patch("super_agent.cli.print_installation_provenance")
     @patch("super_agent.cli.Store.load", side_effect=AssertionError("config was loaded"))
     def test_version_command_does_not_load_configuration(self, load, print_version):

@@ -25,6 +25,7 @@ from .adapters import (
 from .config import AGENTS, CODEX_PROFILE_NAMES, ConfigError, Store
 from .mcp_server import serve as serve_mcp
 from .provenance import print_installation_provenance
+from .release import ReleaseError, run_uninstall, run_update
 
 
 def parser():
@@ -38,6 +39,12 @@ def parser():
 
     provenance = commands.add_parser("version", help="Show installed package provenance")
     provenance.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    update = commands.add_parser("update", help="Update a standalone release installation")
+    update.add_argument("--check", action="store_true", help="Check without installing")
+    update.add_argument("--version", metavar="vX.Y.Z", help="Install an exact release tag")
+
+    commands.add_parser("uninstall", help="Remove a standalone release installation")
 
     commands.add_parser("setup", help="Check prerequisites and show first-run steps")
 
@@ -469,6 +476,18 @@ def main(argv=None):
     if args.command == "version":
         print_installation_provenance(args.json)
         return 0
+    if args.command == "update":
+        try:
+            return run_update(args.check, args.version)
+        except ReleaseError as exc:
+            print(f"sc: {exc}", file=sys.stderr)
+            return 2
+    if args.command == "uninstall":
+        try:
+            return run_uninstall()
+        except ReleaseError as exc:
+            print(f"sc: {exc}", file=sys.stderr)
+            return 2
     store = Store()
     cwd = str(Path.cwd().resolve())
     try:

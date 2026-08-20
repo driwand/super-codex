@@ -58,9 +58,9 @@ published to PyPI. Before tagging from `main`:
 6. Create and push an annotated tag with `git tag -a vX.Y.Z -m "vX.Y.Z"`.
 
 The tag workflow independently checks the annotation, version, changelog, tests,
-build, and both installed entry points. It creates the GitHub Release and attaches
-the wheel and source distribution only after every gate succeeds. A lightweight
-tag or mismatched version fails without publishing a release.
+standalone build, and both command names. It creates the GitHub Release and
+attaches `sc`, `release.json`, and `install.py` only after every gate succeeds. A
+lightweight tag or mismatched version fails without publishing a release.
 
 ## License
 

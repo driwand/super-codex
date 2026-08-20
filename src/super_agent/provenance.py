@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from . import __version__
+from .release import standalone_metadata
 
 
 def _safe_url(value):
@@ -47,6 +48,19 @@ def installation_provenance():
         "requestedRevision": None,
         "commit": None,
     }
+    standalone = standalone_metadata()
+    if standalone is not None:
+        result.update(
+            {
+                "version": standalone.get("version", __version__),
+                "installType": "standalone-release",
+                "source": standalone.get("source"),
+                "vcs": "git",
+                "requestedRevision": standalone.get("tag"),
+                "commit": standalone.get("commit"),
+            }
+        )
+        return result
     try:
         distribution = metadata.distribution("super-codex")
     except metadata.PackageNotFoundError:

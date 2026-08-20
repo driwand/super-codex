@@ -31,20 +31,18 @@ jobs:
         run: |
           python -m unittest discover -s tests -v
           python -m compileall -q src tests
-      - name: Build distributions
+      - name: Build standalone release
         run: |
-          python -m pip install build==1.3.0
-          python -m build
-      - name: Verify installed entry points
+          python scripts/build_standalone.py "$GITHUB_REF_NAME" "$GITHUB_SHA" dist
+      - name: Verify standalone entry points
         run: |
-          python -m venv "$RUNNER_TEMP/release-check"
-          "$RUNNER_TEMP/release-check/bin/pip" install dist/*.whl
-          "$RUNNER_TEMP/release-check/bin/sc" --version
-          "$RUNNER_TEMP/release-check/bin/super-codex" --version
-          "$RUNNER_TEMP/release-check/bin/sc" version --json
+          dist/sc --version
+          dist/sc version --json
+          ln -s "$GITHUB_WORKSPACE/dist/sc" "$RUNNER_TEMP/super-codex"
+          "$RUNNER_TEMP/super-codex" --version
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "$GITHUB_REF_NAME" dist/*
+          gh release create "$GITHUB_REF_NAME" dist/sc dist/release.json install.py
           --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

@@ -20,7 +20,7 @@ Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Co
 - Binds a project directory to a profile without modifying that project.
 - Reads Codex account identity and limits through Codex's app-server protocol.
 - Never reads, copies, decodes, exports, or swaps provider credential files.
-- Has no runtime dependencies, telemetry, daemon, or automatic updater.
+- Has no runtime dependencies, telemetry, daemon, or background updater.
 
 It is not an AI agent, model proxy, token broker, or automatic quota-rotation service.
 
@@ -35,64 +35,61 @@ Windows is not currently supported. The interactive providers may support Window
 
 ## Install and update
 
-From a checkout, run Super Codex without installing:
+The supported installation is a standalone executable from a public GitHub
+Release. Download and inspect the dependency-free installer, then run it:
+
+```bash
+curl -fLO https://github.com/driwand/super-codex/releases/latest/download/install.py
+python3 install.py
+```
+
+You can download `install.py` through a browser instead of using `curl`. The
+installer uses only Python's standard library. It downloads the release manifest
+and standalone `sc` asset, verifies its declared size, SHA-256 checksum, release
+tag, commit, and embedded build metadata, then installs:
+
+```text
+~/.local/bin/sc
+~/.local/bin/super-codex -> sc
+```
+
+It never uses `sudo`, a Python package manager, or a virtual environment, and it
+does not edit shell startup files. If `~/.local/bin` is not on `PATH`, it prints
+the directory you need to add. Existing unrelated commands are never overwritten.
+
+Install an exact stable version or choose another destination when needed:
+
+```bash
+python3 install.py --version vX.Y.Z
+python3 install.py --bin-dir /your/bin/directory
+```
+
+Release tags are the only installation channel; `main` remains development
+source and the project is not published to PyPI. Contributors can run a checkout
+without installing it:
 
 ```bash
 ./sc setup
 ```
 
-For a global command, install into an isolated tool environment with `uv` or
-`pipx`. Install one of those managers first, then run:
-
-```bash
-./install.sh install
-```
-
-The installer supports macOS and Linux, never uses elevated privileges, and does
-not edit shell startup files. It reuses the manager that already owns
-`super-codex`; for a new install it prefers `uv`, then `pipx`. If both managers
-own a copy, it stops and asks you to remove one rather than guessing. The default
-source tracks the private repository's `main` branch and therefore follows the
-development channel. Your Git SSH access must already be configured.
-
-Choose the channel explicitly when reproducibility matters:
-
-```bash
-# Stable: replace vX.Y.Z with an existing release tag.
-./install.sh install \
-  --source 'git+ssh://git@github.com/driwand/super-codex.git@vX.Y.Z'
-
-# Local checkout, useful while developing.
-./install.sh install --source .
-```
-
-Release tags are the stable channel; `main` is the development channel. This
-project is not published to PyPI. A standard virtual environment remains
-available for a checkout-specific installation:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
-```
-
 The distribution name is `super-codex`. Installation provides both `sc` and `super-codex`; this guide uses the shorter `sc` command. The former `sa` name deliberately is not installed because macOS already reserves it for process accounting.
 
-Updates are manual. Refresh the source already recorded by the tool manager:
+Updates are manual and explicit:
 
 ```bash
-./install.sh update
-./install.sh verify
+sc update --check
+sc update
 ```
 
-For a `main` install, `update` advances to the newest commit. A tag is immutable,
-so move a stable install to a newer release—or roll back—by running `install`
-again with the desired tag:
+Install or roll back to an exact immutable release tag with:
 
 ```bash
-./install.sh install \
-  --source 'git+ssh://git@github.com/driwand/super-codex.git@vX.Y.Z'
+sc update --version vX.Y.Z
 ```
+
+An update is downloaded beside the installed executable, fully verified, and
+atomically swapped into place. An interrupted or invalid download leaves the
+current installation unchanged.
 
 Confirm exactly what is running, including the requested Git revision and commit
 when the installer metadata provides them:
@@ -102,11 +99,11 @@ sc version
 sc version --json
 ```
 
-Uninstall the commands without deleting Super Codex configuration or provider
-profiles:
+Uninstall the standalone commands without deleting Super Codex configuration,
+profiles, sessions, or provider state:
 
 ```bash
-./install.sh uninstall
+sc uninstall
 ```
 
 ## Quick start
