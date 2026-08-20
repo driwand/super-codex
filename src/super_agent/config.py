@@ -8,6 +8,8 @@ from pathlib import Path
 
 AGENTS = ("codex", "claude")
 HOME_ENV = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
+SHARED_CODEX_HOME_ENV = "SUPER_CODEX_SHARED_CODEX_HOME"
+CODEX_SESSION_DIRECTORIES = ("sessions", "archived_sessions")
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,47}$")
 
 
@@ -185,12 +187,63 @@ class Store:
                 ensure_private_directory(current, parents=False)
         return path
 
+    def shared_codex_home(self, env=None):
+        env = env or os.environ
+        configured = env.get(SHARED_CODEX_HOME_ENV) or env.get("CODEX_HOME")
+        return absolute_path(configured) if configured else absolute_path(Path.home() / ".codex")
+
+    def _share_codex_sessions(self, isolated_home, shared_home):
+        isolated_home = absolute_path(isolated_home)
+        shared_home = absolute_path(shared_home)
+        if isolated_home == shared_home:
+            return
+        for name in CODEX_SESSION_DIRECTORIES:
+            source = shared_home / name
+            try:
+                source_status = source.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(source_status.st_mode) or not stat.S_ISDIR(source_status.st_mode):
+                raise ConfigError(f"Refusing unsafe shared Codex session path: {source}")
+            if source_status.st_uid != os.getuid():
+                raise ConfigError(f"Shared Codex session path is not owned by this user: {source}")
+
+            destination = isolated_home / name
+            try:
+                destination_status = destination.lstat()
+            except FileNotFoundError:
+                destination_status = None
+            if destination_status and stat.S_ISLNK(destination_status.st_mode):
+                target = Path(os.readlink(destination))
+                if not target.is_absolute():
+                    target = destination.parent / target
+                if absolute_path(target) == source:
+                    continue
+                raise ConfigError(f"Refusing unexpected Codex session link: {destination}")
+            if destination_status:
+                if stat.S_ISDIR(destination_status.st_mode) and not any(destination.iterdir()):
+                    os.rmdir(destination)
+                else:
+                    raise ConfigError(
+                        f"Cannot share Codex sessions because {destination} already contains data"
+                    )
+            try:
+                os.symlink(source, destination, target_is_directory=True)
+            except OSError as exc:
+                raise ConfigError(f"Cannot share Codex sessions at {destination}: {exc}") from exc
+
     def environment(self, agent, profile, config=None):
         config = config or self.load()
         env = os.environ.copy()
         home = self.profile_home(agent, profile, config, create=True)
         if home:
+            if agent == "codex":
+                shared_home = self.shared_codex_home(env)
+                self._share_codex_sessions(home, shared_home)
+                env[SHARED_CODEX_HOME_ENV] = str(shared_home)
             env[HOME_ENV[agent]] = str(home)
+        elif agent == "codex":
+            env[SHARED_CODEX_HOME_ENV] = str(self.shared_codex_home(env))
         return env
 
     def selection(self, config, workspace, agent=None, profile=None):

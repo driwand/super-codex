@@ -16,9 +16,17 @@ class StoreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.home = Path(self.temporary.name) / "state"
+        self.codex_home = Path(self.temporary.name) / "main-codex"
+        (self.codex_home / "sessions").mkdir(parents=True)
+        (self.codex_home / "archived_sessions").mkdir()
+        self.environment = patch.dict(
+            os.environ, {"CODEX_HOME": str(self.codex_home)}, clear=False
+        )
+        self.environment.start()
         self.store = Store(self.home)
 
     def tearDown(self):
+        self.environment.stop()
         self.temporary.cleanup()
 
     def test_first_load_creates_private_default_config(self):
@@ -40,6 +48,25 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(env["CODEX_HOME"], str(expected))
         self.assertTrue(expected.is_dir())
         self.assertEqual(stat.S_IMODE(expected.stat().st_mode), 0o700)
+
+    def test_isolated_codex_profile_shares_only_session_directories(self):
+        config = self.store.load()
+        env = self.store.environment("codex", "second", config)
+        profile_home = Path(env["CODEX_HOME"])
+        for name in ("sessions", "archived_sessions"):
+            linked = profile_home / name
+            self.assertTrue(linked.is_symlink())
+            self.assertEqual(linked.resolve(), (self.codex_home / name).resolve())
+        self.assertFalse((profile_home / "auth.json").exists())
+
+    def test_refuses_to_replace_existing_isolated_session_data(self):
+        config = self.store.load()
+        profile_home = self.store.profile_home("codex", "second", config, create=True)
+        sessions = profile_home / "sessions"
+        sessions.mkdir()
+        (sessions / "existing-session.jsonl").write_text("local", encoding="utf-8")
+        with self.assertRaisesRegex(ConfigError, "already contains data"):
+            self.store.environment("codex", "second", config)
 
     def test_shared_profile_inherits_provider_environment(self):
         config = self.store.load()
