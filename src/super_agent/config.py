@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import stat
 import tempfile
 from copy import deepcopy
@@ -11,6 +12,9 @@ HOME_ENV = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
 SHARED_CODEX_HOME_ENV = "SUPER_CODEX_SHARED_CODEX_HOME"
 CODEX_SESSION_DIRECTORIES = ("sessions", "archived_sessions")
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,47}$")
+PROVIDER_HOME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$")
+CODEX_PROFILE_NAMES = ("main", "2", "3", "4", "5")
+STARTUP_MODES = ("select", "main")
 
 
 class ConfigError(RuntimeError):
@@ -42,18 +46,19 @@ def ensure_private_directory(path, parents=True):
 
 def default_config():
     return {
-        "version": 1,
+        "version": 2,
+        "startupMode": "select",
         "defaults": {"agent": "codex", "profile": "main"},
         "agentDefaults": {"codex": "main", "claude": "main"},
         "profiles": {
             "codex": {
                 "main": {"label": "Codex 1", "isolation": "shared"},
-                "second": {"label": "Codex 2", "isolation": "isolated"},
             },
             "claude": {
                 "main": {"label": "Claude", "isolation": "shared"},
             },
         },
+        "profileOrder": {"codex": ["main"], "claude": ["main"]},
         "workspaces": {},
     }
 
@@ -64,11 +69,7 @@ def resolve_home():
         return absolute_path(override)
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
-    current = base / "super-codex"
-    legacy = base / "super-agent-control"
-    # Retain existing profile bindings after the public rename without moving
-    # provider homes or touching any provider-managed credentials.
-    return absolute_path(legacy if legacy.exists() and not current.exists() else current)
+    return absolute_path(base / "super-codex")
 
 
 class Store:
@@ -132,17 +133,26 @@ class Store:
             raise
 
     def validate(self, config):
-        if not isinstance(config, dict) or config.get("version") != 1:
+        if not isinstance(config, dict) or config.get("version") != 2:
             raise ConfigError("Unsupported or invalid config version")
+        if config.get("startupMode") not in STARTUP_MODES:
+            raise ConfigError("Config startupMode must be 'select' or 'main'")
         profiles = config.get("profiles")
         if not isinstance(profiles, dict):
             raise ConfigError("Config profiles must be an object")
         for agent in AGENTS:
             if not isinstance(profiles.get(agent), dict):
                 raise ConfigError(f"Missing profiles for {agent}")
+            if not profiles[agent]:
+                raise ConfigError(f"At least one {agent} profile is required")
+            if agent == "codex" and len(profiles[agent]) > len(CODEX_PROFILE_NAMES):
+                raise ConfigError("At most 5 Codex profiles are supported")
+            provider_homes = set()
             for name, profile in profiles[agent].items():
                 if not NAME_PATTERN.match(name):
                     raise ConfigError(f"Invalid profile name: {name}")
+                if agent == "codex" and name not in CODEX_PROFILE_NAMES:
+                    raise ConfigError("Codex profiles must be named main, 2, 3, 4, or 5")
                 if not isinstance(profile, dict):
                     raise ConfigError(f"Profile must be an object: {agent}/{name}")
                 label = profile.get("label")
@@ -150,6 +160,33 @@ class Store:
                     raise ConfigError(f"Invalid label for {agent}/{name}")
                 if profile.get("isolation") not in ("shared", "isolated"):
                     raise ConfigError(f"Invalid isolation for {agent}/{name}")
+                provider_home = profile.get("providerHome")
+                if profile["isolation"] == "shared":
+                    if provider_home is not None:
+                        raise ConfigError(
+                            f"Shared profile cannot select a provider home: {agent}/{name}"
+                        )
+                    continue
+                provider_home = provider_home or name
+                if (
+                    not isinstance(provider_home, str)
+                    or not PROVIDER_HOME_PATTERN.match(provider_home)
+                ):
+                    raise ConfigError(f"Invalid provider home for {agent}/{name}")
+                if provider_home in provider_homes:
+                    raise ConfigError(f"Provider homes must be unique for {agent}")
+                provider_homes.add(provider_home)
+        if "main" not in profiles["codex"]:
+            raise ConfigError("The codex/main profile is required")
+        profile_order = config.get("profileOrder")
+        if not isinstance(profile_order, dict):
+            raise ConfigError("Config profileOrder must be an object")
+        for agent in AGENTS:
+            order = profile_order.get(agent)
+            if not isinstance(order, list) or any(not isinstance(name, str) for name in order):
+                raise ConfigError(f"Config profileOrder.{agent} must be a list")
+            if len(order) != len(set(order)) or set(order) != set(profiles[agent]):
+                raise ConfigError(f"Config profileOrder.{agent} must list every profile once")
         defaults = config.get("defaults", {})
         self.require_profile(config, defaults.get("agent"), defaults.get("profile"))
         agent_defaults = config.get("agentDefaults")
@@ -168,24 +205,125 @@ class Store:
     def require_profile(self, config, agent, profile):
         if agent not in AGENTS:
             raise ConfigError(f"Unsupported agent: {agent}")
+        profile = self.normalize_profile(agent, profile)
         if profile not in config.get("profiles", {}).get(agent, {}):
-            available = ", ".join(sorted(config.get("profiles", {}).get(agent, {}))) or "none"
+            available = ", ".join(self.ordered_profile_names(config, agent)) or "none"
             raise ConfigError(f"Unknown profile: {agent}/{profile}. Available {agent} profiles: {available}")
         return config["profiles"][agent][profile]
 
+    @staticmethod
+    def normalize_profile(agent, profile):
+        return "main" if agent == "codex" and profile == "1" else profile
+
+    def ordered_profile_names(self, config, agent):
+        if agent not in AGENTS:
+            raise ConfigError(f"Unsupported agent: {agent}")
+        return list(config["profileOrder"][agent])
+
     def profile_home(self, agent, profile, config=None, create=False):
         config = config or self.load()
+        profile = self.normalize_profile(agent, profile)
         data = self.require_profile(config, agent, profile)
         if data["isolation"] == "shared":
             return None
-        path = self.home / "profiles" / agent / profile
+        provider_home = data.get("providerHome", profile)
+        return self._provider_home(agent, provider_home, create)
+
+    def _provider_home(self, agent, provider_home, create=False):
+        if agent not in AGENTS or not PROVIDER_HOME_PATTERN.match(provider_home):
+            raise ConfigError("Invalid provider home")
+        path = self.home / "profiles" / agent / provider_home
         if create:
             self._ensure_home()
             current = self.home
-            for component in ("profiles", agent, profile):
+            for component in ("profiles", agent, provider_home):
                 current = current / component
                 ensure_private_directory(current, parents=False)
         return path
+
+    def replacement_environment(self, agent, profile, config):
+        profile = self.normalize_profile(agent, profile)
+        data = self.require_profile(config, agent, profile)
+        if data["isolation"] != "isolated":
+            raise ConfigError(
+                f"Safe replacement requires an isolated profile: {agent}/{profile}"
+            )
+        parent = self._provider_home(agent, profile).parent
+        self._ensure_home()
+        current = self.home
+        for component in ("profiles", agent):
+            current = current / component
+            ensure_private_directory(current, parents=False)
+        candidate = Path(
+            tempfile.mkdtemp(prefix=f"{profile}-replacement-", dir=str(parent))
+        )
+        ensure_private_directory(candidate, parents=False)
+        env = os.environ.copy()
+        if agent == "codex":
+            shared_home = self.shared_codex_home(env)
+            self._share_codex_sessions(candidate, shared_home)
+            env[SHARED_CODEX_HOME_ENV] = str(shared_home)
+        env[HOME_ENV[agent]] = str(candidate)
+        return candidate.name, env
+
+    def commit_profile_replacement(
+        self, config, agent, profile, provider_home, label=None
+    ):
+        profile = self.normalize_profile(agent, profile)
+        data = self.require_profile(config, agent, profile)
+        if data["isolation"] != "isolated":
+            raise ConfigError(
+                f"Safe replacement requires an isolated profile: {agent}/{profile}"
+            )
+        candidate = self._provider_home(agent, provider_home)
+        try:
+            candidate_status = candidate.lstat()
+        except OSError as exc:
+            raise ConfigError(f"Cannot use replacement provider home: {exc}") from exc
+        if (
+            stat.S_ISLNK(candidate_status.st_mode)
+            or not stat.S_ISDIR(candidate_status.st_mode)
+            or candidate_status.st_uid != os.getuid()
+        ):
+            raise ConfigError("Refusing unsafe replacement provider home")
+        updated = deepcopy(config)
+        updated_data = updated["profiles"][agent][profile]
+        previous_home = data.get("providerHome", profile)
+        updated_data["providerHome"] = provider_home
+        if label is not None:
+            display_label = label.strip()
+            if not display_label or len(display_label) > 80:
+                raise ConfigError("Profile labels must contain 1-80 characters")
+            updated_data["label"] = display_label
+        self.save(updated)
+        config.clear()
+        config.update(updated)
+        return previous_home
+
+    def discard_provider_home(self, config, agent, provider_home):
+        if agent not in AGENTS or not PROVIDER_HOME_PATTERN.match(provider_home):
+            raise ConfigError("Invalid provider home")
+        for name, profile in config["profiles"][agent].items():
+            if profile["isolation"] == "isolated" and profile.get(
+                "providerHome", name
+            ) == provider_home:
+                raise ConfigError(f"Provider home is still active: {agent}/{name}")
+        path = self._provider_home(agent, provider_home)
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            return False
+        if (
+            stat.S_ISLNK(status.st_mode)
+            or not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+        ):
+            raise ConfigError(f"Refusing unsafe provider home cleanup: {path}")
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            raise ConfigError(f"Cannot remove unused provider home {path}: {exc}") from exc
+        return True
 
     def shared_codex_home(self, env=None):
         env = env or os.environ
@@ -256,6 +394,7 @@ class Store:
             selected_profile = config["agentDefaults"][selected_agent]
         else:
             selected_profile = base["profile"]
+        selected_profile = self.normalize_profile(selected_agent, selected_profile)
         self.require_profile(config, selected_agent, selected_profile)
         return selected_agent, selected_profile, matched
 
@@ -270,6 +409,7 @@ class Store:
         return None, None
 
     def bind(self, config, workspace, agent, profile, globally=False):
+        profile = self.normalize_profile(agent, profile)
         self.require_profile(config, agent, profile)
         if globally:
             config["defaults"] = {"agent": agent, "profile": profile}
@@ -289,25 +429,50 @@ class Store:
     def add_profile(self, config, agent, name, label=None, shared=False):
         if agent not in AGENTS:
             raise ConfigError(f"Unsupported agent: {agent}")
+        name = self.normalize_profile(agent, name)
         if not NAME_PATTERN.match(name):
             raise ConfigError("Profile names may contain letters, numbers, dot, underscore, and dash")
+        if agent == "codex" and name not in CODEX_PROFILE_NAMES:
+            raise ConfigError("Codex profiles must be named main, 2, 3, 4, or 5")
+        if agent == "codex" and len(config["profiles"][agent]) >= len(CODEX_PROFILE_NAMES):
+            raise ConfigError("At most 5 Codex profiles are supported")
         if name in config["profiles"][agent]:
             raise ConfigError(f"Profile already exists: {agent}/{name}")
-        display_label = (label or name).strip()
+        default_label = f"Codex {1 if name == 'main' else name}" if agent == "codex" else name
+        display_label = (label or default_label).strip()
         if not display_label or len(display_label) > 80:
             raise ConfigError("Profile labels must contain 1-80 characters")
         config["profiles"][agent][name] = {
             "label": display_label,
             "isolation": "shared" if shared else "isolated",
         }
+        config["profileOrder"][agent].append(name)
         if not shared:
             self.profile_home(agent, name, config, create=True)
         self.save(config)
 
     def set_label(self, config, agent, profile, label):
+        profile = self.normalize_profile(agent, profile)
         data = self.require_profile(config, agent, profile)
         display_label = label.strip()
         if not display_label or len(display_label) > 80:
             raise ConfigError("Profile labels must contain 1-80 characters")
         data["label"] = display_label
+        self.save(config)
+
+    def set_profile_order(self, config, agent, profiles):
+        if agent not in AGENTS:
+            raise ConfigError(f"Unsupported agent: {agent}")
+        normalized = [self.normalize_profile(agent, name) for name in profiles]
+        expected = set(config["profiles"][agent])
+        if len(normalized) != len(set(normalized)) or set(normalized) != expected:
+            current = " ".join(self.ordered_profile_names(config, agent))
+            raise ConfigError(f"Order must list every {agent} profile once. Current: {current}")
+        config["profileOrder"][agent] = normalized
+        self.save(config)
+
+    def set_startup_mode(self, config, mode):
+        if mode not in STARTUP_MODES:
+            raise ConfigError("Startup mode must be 'select' or 'main'")
+        config["startupMode"] = mode
         self.save(config)
