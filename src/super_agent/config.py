@@ -10,6 +10,7 @@ from pathlib import Path
 AGENTS = ("codex", "claude")
 HOME_ENV = {"codex": "CODEX_HOME", "claude": "CLAUDE_CONFIG_DIR"}
 SHARED_CODEX_HOME_ENV = "SUPER_CODEX_SHARED_CODEX_HOME"
+SHARED_CLAUDE_HOME_ENV = "SUPER_CODEX_SHARED_CLAUDE_CONFIG_DIR"
 CODEX_SESSION_DIRECTORIES = ("sessions", "archived_sessions")
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,47}$")
 PROVIDER_HOME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$")
@@ -292,6 +293,8 @@ class Store:
             shared_home = self.shared_codex_home(env)
             self._share_codex_sessions(candidate, shared_home)
             env[SHARED_CODEX_HOME_ENV] = str(shared_home)
+        else:
+            self._remember_shared_claude_home(env)
         env[HOME_ENV[agent]] = str(candidate)
         return candidate.name, env
 
@@ -359,6 +362,11 @@ class Store:
         configured = env.get(SHARED_CODEX_HOME_ENV) or env.get("CODEX_HOME")
         return absolute_path(configured) if configured else absolute_path(Path.home() / ".codex")
 
+    @staticmethod
+    def _remember_shared_claude_home(env):
+        if SHARED_CLAUDE_HOME_ENV not in env:
+            env[SHARED_CLAUDE_HOME_ENV] = env.get(HOME_ENV["claude"], "")
+
     def _share_codex_sessions(self, isolated_home, shared_home):
         isolated_home = absolute_path(isolated_home)
         shared_home = absolute_path(shared_home)
@@ -408,11 +416,20 @@ class Store:
                 shared_home = self.shared_codex_home(env)
                 self._share_codex_sessions(home, shared_home)
                 env[SHARED_CODEX_HOME_ENV] = str(shared_home)
+            else:
+                self._remember_shared_claude_home(env)
             env[HOME_ENV[agent]] = str(home)
         else:
             if agent == "codex":
-                env[SHARED_CODEX_HOME_ENV] = str(self.shared_codex_home(env))
-            env.pop(HOME_ENV[agent], None)
+                shared_home = self.shared_codex_home(env)
+                env[SHARED_CODEX_HOME_ENV] = str(shared_home)
+                env[HOME_ENV[agent]] = str(shared_home)
+            elif SHARED_CLAUDE_HOME_ENV in env:
+                shared_home = env[SHARED_CLAUDE_HOME_ENV]
+                if shared_home:
+                    env[HOME_ENV[agent]] = shared_home
+                else:
+                    env.pop(HOME_ENV[agent], None)
         return env
 
     def selection(self, config, workspace, agent=None, profile=None):

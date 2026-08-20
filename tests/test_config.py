@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from super_agent.config import (
     ConfigError,
+    SHARED_CLAUDE_HOME_ENV,
+    SHARED_CODEX_HOME_ENV,
     Store,
     default_config,
     ensure_private_directory,
@@ -84,7 +86,7 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "already contains data"):
             self.store.environment("codex", "2", config)
 
-    def test_shared_profile_clears_inherited_provider_environment(self):
+    def test_shared_profiles_preserve_exported_provider_homes(self):
         config = self.store.load()
         with patch.dict(
             os.environ,
@@ -93,8 +95,59 @@ class StoreTests(unittest.TestCase):
         ):
             env = self.store.environment("codex", "main", config)
             claude_env = self.store.environment("claude", "main", config)
-        self.assertNotIn("CODEX_HOME", env)
-        self.assertNotIn("CLAUDE_CONFIG_DIR", claude_env)
+        self.assertEqual(env["CODEX_HOME"], "/inherited")
+        self.assertEqual(env[SHARED_CODEX_HOME_ENV], "/inherited")
+        self.assertEqual(claude_env["CLAUDE_CONFIG_DIR"], "/inherited-claude")
+
+    def test_nested_shared_codex_restores_exported_home(self):
+        config = self.store.load()
+        self.store.add_profile(config, "codex", "2", "Personal")
+        with patch.dict(
+            os.environ, {"CODEX_HOME": str(self.codex_home)}, clear=True
+        ):
+            isolated = self.store.environment("codex", "2", config)
+        with patch.dict(os.environ, isolated, clear=True):
+            shared = self.store.environment("codex", "main", config)
+        self.assertEqual(shared["CODEX_HOME"], str(self.codex_home.absolute()))
+        self.assertEqual(
+            shared[SHARED_CODEX_HOME_ENV], str(self.codex_home.absolute())
+        )
+
+    def test_nested_shared_claude_restores_exported_home(self):
+        config = self.store.load()
+        self.store.add_profile(config, "claude", "reviewer", "Reviewer")
+        exported = str(Path(self.temporary.name) / "shared-claude")
+        with patch.dict(
+            os.environ, {"CLAUDE_CONFIG_DIR": exported}, clear=True
+        ):
+            isolated = self.store.environment("claude", "reviewer", config)
+        self.assertEqual(isolated[SHARED_CLAUDE_HOME_ENV], exported)
+        with patch.dict(os.environ, isolated, clear=True):
+            shared = self.store.environment("claude", "main", config)
+        self.assertEqual(shared["CLAUDE_CONFIG_DIR"], exported)
+
+    def test_nested_shared_claude_restores_unset_home(self):
+        config = self.store.load()
+        self.store.add_profile(config, "claude", "reviewer", "Reviewer")
+        with patch.dict(os.environ, {}, clear=True):
+            isolated = self.store.environment("claude", "reviewer", config)
+        self.assertEqual(isolated[SHARED_CLAUDE_HOME_ENV], "")
+        with patch.dict(os.environ, isolated, clear=True):
+            shared = self.store.environment("claude", "main", config)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", shared)
+
+    def test_claude_replacement_environment_remembers_shared_home(self):
+        config = self.store.load()
+        self.store.add_profile(config, "claude", "reviewer", "Reviewer")
+        exported = str(Path(self.temporary.name) / "shared-claude")
+        with patch.dict(
+            os.environ, {"CLAUDE_CONFIG_DIR": exported}, clear=True
+        ):
+            _, replacement = self.store.replacement_environment(
+                "claude", "reviewer", config
+            )
+        self.assertEqual(replacement[SHARED_CLAUDE_HOME_ENV], exported)
+        self.assertNotEqual(replacement["CLAUDE_CONFIG_DIR"], exported)
 
     def test_nearest_workspace_binding_wins(self):
         config = self.store.load()

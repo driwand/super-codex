@@ -231,9 +231,18 @@ The five supported Codex identifiers are exactly `main`, `2`, `3`, `4`, and `5` 
 sc profile order codex main 3 2
 ```
 
-Codex officially supports relocating state with `CODEX_HOME`. Super Codex keeps the provider homes separate but creates validated links for only `sessions` and `archived_sessions`. Credential files, configuration, logs, and account-specific databases are not linked. An existing non-empty isolated session directory is never replaced automatically.
+Codex officially supports relocating state with `CODEX_HOME`. Super Codex preserves
+an exported shared home across direct and nested launches, keeps isolated provider
+homes separate, and creates validated links for only `sessions` and
+`archived_sessions`. Credential files, configuration, logs, and account-specific
+databases are not linked. An existing non-empty isolated session directory is never
+replaced automatically.
 
-Isolated Claude profiles use `CLAUDE_CONFIG_DIR`, which works in current Claude Code releases but is not documented as a stable public interface; the default Claude profile therefore remains shared.
+Isolated Claude profiles use `CLAUDE_CONFIG_DIR`, which works in current Claude Code
+releases but is not documented as a stable public interface. Super Codex remembers
+whether that variable was exported before entering an isolated profile so a nested
+shared-profile launch restores the original value or its absence; the default Claude
+profile therefore remains shared.
 
 Isolation covers provider configuration, credentials, logs, and account-specific databases stored in that provider home. Codex transcripts are intentionally shared so either account can resume them. It does not isolate operating-system state such as Git configuration, SSH keys, keychains, browser sessions, or files accessible to the launched agent.
 
