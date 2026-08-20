@@ -2,6 +2,9 @@
 
 A local, Codex-first control plane for using multiple Codex accounts and consulting Claude without leaving Codex.
 
+> **Disclaimer:** This project is **FULLY vibe coded**. Review the source and test
+> it in your own environment before relying on it.
+
 Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Codex remains the main interface. Account credentials stay isolated, local Codex session history is shared across those accounts, and Claude is exposed to Codex as a read-only consultation tool.
 
 ## What it does
