@@ -12,6 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Added a default arrow-key account picker that shows live identity and limit details.
 - Added direct `sc main` and `sc 2` through `sc 5` launch shorthands.
 - Added configurable picker ordering and a global `select`/`main` bare-command mode.
+- Added a native Codex status line for interactive sessions with model and reasoning,
+  weekly usage remaining, Git branch, and working directory.
 
 ### Changed
 

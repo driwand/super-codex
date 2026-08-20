@@ -111,6 +111,12 @@ sc config mode main
 sc config mode select
 ```
 
+Interactive Codex sessions launched by `sc start`, bare `sc`, or `sc resume` use
+Codex's native status line to show the model and reasoning level, weekly usage
+remaining, the current Git branch, and the working directory. Codex omits usage
+or branch fields when their data is unavailable. The override applies only to the
+launched session and does not modify the profile's `config.toml`.
+
 Then ask naturally inside Codex:
 
 ```text

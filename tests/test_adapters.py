@@ -26,7 +26,16 @@ class CommandTests(unittest.TestCase):
         command = build_command("codex", "start", "/repo", prompt="fix it", model="gpt-test")
         self.assertEqual(
             command,
-            ["codex", "-C", "/repo", "--model", "gpt-test", "fix it"],
+            [
+                "codex",
+                "-C",
+                "/repo",
+                "-c",
+                'tui.status_line=["model-with-reasoning", "weekly-limit", "git-branch", "current-dir"]',
+                "--model",
+                "gpt-test",
+                "fix it",
+            ],
         )
 
     def test_numbered_codex_account_does_not_change_command(self):
@@ -38,7 +47,18 @@ class CommandTests(unittest.TestCase):
 
     def test_codex_resume_last(self):
         command = build_command("codex", "resume", "/repo", use_last=True)
-        self.assertEqual(command, ["codex", "resume", "-C", "/repo", "--last"])
+        self.assertEqual(
+            command,
+            [
+                "codex",
+                "resume",
+                "-C",
+                "/repo",
+                "--last",
+                "-c",
+                'tui.status_line=["model-with-reasoning", "weekly-limit", "git-branch", "current-dir"]',
+            ],
+        )
 
     def test_codex_launch_can_inject_claude_mcp_without_shell(self):
         command = build_command(

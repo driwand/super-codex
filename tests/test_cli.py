@@ -149,6 +149,11 @@ class CliTests(unittest.TestCase):
         code, output = self.output(["start", "--dry-run"])
         self.assertEqual(code, 0)
         self.assertIn("codex -C", output)
+        self.assertIn("model-with-reasoning", output)
+        self.assertIn("weekly-limit", output)
+        self.assertNotIn("five-hour-limit", output)
+        self.assertIn("git-branch", output)
+        self.assertIn("current-dir", output)
         self.assertNotIn("CODEX_HOME=", output)
 
     def test_numbered_codex_profile_has_isolated_home(self):

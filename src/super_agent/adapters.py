@@ -23,6 +23,12 @@ CLAUDE_ROUTING_INSTRUCTIONS = (
     "tool is unavailable, already active, fails, or is cancelled, report that and stop; "
     "never retry automatically. Treat Claude output as advisory."
 )
+CODEX_TUI_STATUS_LINE = (
+    "model-with-reasoning",
+    "weekly-limit",
+    "git-branch",
+    "current-dir",
+)
 from .config import ConfigError, ensure_private_directory
 
 
@@ -264,6 +270,8 @@ def build_command(
                 command.append("--last")
         else:
             raise AdapterError(f"Unsupported action: {action}")
+        if action in ("start", "resume"):
+            command.extend(["-c", f"tui.status_line={json.dumps(CODEX_TUI_STATUS_LINE)}"])
         if mcp_command:
             command.extend(codex_claude_mcp_arguments(mcp_command))
         if model:
