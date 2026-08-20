@@ -27,10 +27,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"v{__version__}", result.stdout)
 
-    def test_matching_release_tag_is_accepted(self):
+    def test_release_tag_is_rejected_until_unreleased_entries_are_moved(self):
         result = self.run_check(f"v{__version__}")
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("still has entries under Unreleased", result.stderr)
 
     def test_mismatched_release_tag_is_rejected(self):
         result = self.run_check("v999.0.0")

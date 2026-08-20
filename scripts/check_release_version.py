@@ -27,6 +27,18 @@ def project_version(text):
     raise ValueError("pyproject.toml has no [project] version")
 
 
+def unreleased_has_entries(changelog):
+    in_unreleased = False
+    for line in changelog.splitlines():
+        if line.startswith("## ["):
+            if in_unreleased:
+                return False
+            in_unreleased = line.strip() == "## [Unreleased]"
+        elif in_unreleased and line.lstrip().startswith("- "):
+            return True
+    return False
+
+
 def validate(tag=None):
     declared = project_version((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     errors = []
@@ -40,6 +52,8 @@ def validate(tag=None):
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     if f"## [{declared}]" not in changelog:
         errors.append(f"CHANGELOG.md has no release section for {declared}")
+    if tag is not None and unreleased_has_entries(changelog):
+        errors.append("CHANGELOG.md still has entries under Unreleased")
     return errors
 
 
