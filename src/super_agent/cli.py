@@ -24,6 +24,7 @@ from .adapters import (
 )
 from .config import AGENTS, CODEX_PROFILE_NAMES, ConfigError, Store
 from .mcp_server import serve as serve_mcp
+from .provenance import print_installation_provenance
 
 
 def parser():
@@ -34,6 +35,9 @@ def parser():
     )
     root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = root.add_subparsers(dest="command")
+
+    provenance = commands.add_parser("version", help="Show installed package provenance")
+    provenance.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     commands.add_parser("setup", help="Check prerequisites and show first-run steps")
 
@@ -462,6 +466,9 @@ def main(argv=None):
     if bare_invocation:
         argv = ["start"]
     args = parser().parse_args(argv)
+    if args.command == "version":
+        print_installation_provenance(args.json)
+        return 0
     store = Store()
     cwd = str(Path.cwd().resolve())
     try:

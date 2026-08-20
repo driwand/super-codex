@@ -79,7 +79,7 @@ select_manager() {
 verify_installation() {
     command_exists sc || fail "sc is not on PATH"
     command_exists super-codex || fail "super-codex is not on PATH"
-    sc --version
+    sc version --json
     super-codex --version
 }
 
