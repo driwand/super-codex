@@ -52,6 +52,12 @@ class ClaudeSessionRegistry:
         with self._lock:
             self._sessions[self._key(cwd, profile)] = session_id
 
+    def discard(self, cwd, profile, session_id=None):
+        with self._lock:
+            key = self._key(cwd, profile)
+            if session_id is None or self._sessions.get(key) == session_id:
+                self._sessions.pop(key, None)
+
 
 def _integer_setting(env, name, default, minimum, maximum):
     raw = env.get(name)
@@ -214,6 +220,8 @@ def _terminate_process_group(process):
         pass
     deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
     while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
         try:
             os.killpg(process_group, 0)
         except ProcessLookupError:
@@ -338,6 +346,8 @@ def run_claude_consult(
                 _terminate_process_group(process)
         output = stdout.strip()
         if process.returncode != 0:
+            if session_registry is not None and session_id is not None:
+                session_registry.discard(cwd, profile, session_id)
             detail = (stderr or stdout).strip().splitlines()
             raise AdapterError(detail[-1] if detail else "Claude consultation failed")
         if session_registry is not None:
@@ -515,7 +525,7 @@ def serve(
     output_lock = threading.Lock()
     pending_lock = threading.Lock()
     pending = {}
-    workers = []
+    workers = set()
     session_registry = ClaudeSessionRegistry()
 
     def write_response(response):
@@ -551,6 +561,7 @@ def serve(
             with pending_lock:
                 if pending.get(request_id) is cancel_event:
                     pending.pop(request_id, None)
+                workers.discard(threading.current_thread())
         write_response(response)
 
     previous_handlers = {}
@@ -598,7 +609,8 @@ def serve(
                     name=f"claude-consult-{request_id}",
                     daemon=True,
                 )
-                workers.append(worker)
+                with pending_lock:
+                    workers.add(worker)
                 worker.start()
                 continue
             write_response(
@@ -613,7 +625,9 @@ def serve(
     finally:
         cancel_pending()
         deadline = time.monotonic() + WORKER_SHUTDOWN_GRACE_SECONDS
-        for worker in workers:
+        with pending_lock:
+            remaining_workers = list(workers)
+        for worker in remaining_workers:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break

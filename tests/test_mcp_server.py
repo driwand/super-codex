@@ -1,11 +1,14 @@
+import gc
 import io
 import json
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
+import weakref
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -20,6 +23,7 @@ from super_agent.mcp_server import (
     MAX_OUTPUT_CHARS,
     TOOL_NAME,
     _current_change_context,
+    _terminate_process_group,
     consultation_lock,
     handle_request,
     run_claude_consult,
@@ -253,6 +257,47 @@ class McpProtocolTests(unittest.TestCase):
         )
         self.assertTrue(cancelled.is_set())
 
+    def test_completed_workers_are_released_while_server_remains_active(self):
+        output = io.StringIO()
+        references = []
+        real_thread = threading.Thread
+
+        def record_thread(*args, **kwargs):
+            worker = real_thread(*args, **kwargs)
+            references.append(weakref.ref(worker))
+            return worker
+
+        def requests():
+            for request_id in (41, 42):
+                yield json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "tools/call",
+                        "params": {
+                            "name": TOOL_NAME,
+                            "arguments": {"request": f"Review {request_id}"},
+                        },
+                    }
+                ) + "\n"
+                deadline = time.monotonic() + 1
+                while len(output.getvalue().splitlines()) < request_id - 40:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+            gc.collect()
+            self.assertIsNone(references[0]())
+
+        with patch(
+            "super_agent.mcp_server.threading.Thread", side_effect=record_thread
+        ):
+            serve(
+                self.store,
+                "/repo",
+                requests(),
+                output,
+                consult=Mock(return_value="Done"),
+            )
+
 
 class ClaudeConsultTests(unittest.TestCase):
     def store(self, directory):
@@ -417,6 +462,43 @@ class ClaudeConsultTests(unittest.TestCase):
         self.assertEqual(
             final_command[final_command.index("--resume") + 1], first_session_id
         )
+
+    @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
+    @patch("super_agent.mcp_server.subprocess.Popen")
+    def test_failed_resume_discards_stale_session_for_next_call(
+        self, popen, executable
+    ):
+        registry = ClaudeSessionRegistry()
+        popen.side_effect = [
+            self.process(result="First"),
+            self.process(result="Failed", stderr="session not found", returncode=1),
+            self.process(result="Recovered"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            self_store = self.store(directory)
+            run_claude_consult(
+                self_store, "/repo", "Review", session_registry=registry
+            )
+            with self.assertRaisesRegex(AdapterError, "session not found"):
+                run_claude_consult(
+                    self_store, "/repo", "Follow up", session_registry=registry
+                )
+            run_claude_consult(
+                self_store, "/repo", "Try again", session_registry=registry
+            )
+        recovered_command = popen.call_args_list[2].args[0]
+        self.assertNotIn("--resume", recovered_command)
+        self.assertIn("--session-id", recovered_command)
+
+    @patch("super_agent.mcp_server.time.sleep")
+    @patch("super_agent.mcp_server.os.killpg")
+    def test_termination_stops_waiting_after_child_exits(self, killpg, sleep):
+        process = Mock(pid=12345)
+        process.poll.side_effect = [None, 0]
+        _terminate_process_group(process)
+        killpg.assert_called_once_with(12345, 15)
+        sleep.assert_not_called()
+        process.communicate.assert_called_once()
 
     @patch("super_agent.mcp_server._terminate_process_group")
     @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
