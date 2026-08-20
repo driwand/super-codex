@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from super_agent.adapters import (
+    CLAUDE_ROUTING_INSTRUCTIONS,
     AdapterError,
     LiveStatus,
     auth_status,
@@ -16,6 +17,7 @@ from super_agent.adapters import (
     codex_live_status,
     exec_command,
     format_codex_live,
+    run_command,
 )
 
 
@@ -27,7 +29,7 @@ class CommandTests(unittest.TestCase):
             ["codex", "-C", "/repo", "--model", "gpt-test", "fix it"],
         )
 
-    def test_codex_second_account_does_not_change_command(self):
+    def test_numbered_codex_account_does_not_change_command(self):
         command = build_command("codex", "ask", "/repo", prompt="inspect")
         self.assertEqual(
             command,
@@ -37,6 +39,40 @@ class CommandTests(unittest.TestCase):
     def test_codex_resume_last(self):
         command = build_command("codex", "resume", "/repo", use_last=True)
         self.assertEqual(command, ["codex", "resume", "-C", "/repo", "--last"])
+
+    def test_codex_launch_can_inject_claude_mcp_without_shell(self):
+        command = build_command(
+            "codex",
+            "start",
+            "/repo",
+            mcp_command="/opt/Super Codex/bin/super-codex",
+        )
+        self.assertEqual(command[0:3], ["codex", "-C", "/repo"])
+        self.assertIn(
+            'mcp_servers.super_codex_claude.command="/opt/Super Codex/bin/super-codex"',
+            command,
+        )
+        self.assertIn('mcp_servers.super_codex_claude.args=["mcp-server"]', command)
+        self.assertIn("mcp_servers.super_codex_claude.required=true", command)
+        self.assertIn(
+            'mcp_servers.super_codex_claude.enabled_tools=["ask_claude"]', command
+        )
+        self.assertIn(
+            'mcp_servers.super_codex_claude.tools.ask_claude.approval_mode="auto"',
+            command,
+        )
+        self.assertIn("mcp_servers.super_codex_claude.tool_timeout_sec=180", command)
+        self.assertIn(
+            f"developer_instructions={json.dumps(CLAUDE_ROUTING_INSTRUCTIONS)}", command
+        )
+        self.assertIn("include_diff=true", CLAUDE_ROUTING_INSTRUCTIONS)
+        self.assertIn("new_context=true", CLAUDE_ROUTING_INSTRUCTIONS)
+        self.assertIn("never retry automatically", CLAUDE_ROUTING_INSTRUCTIONS)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+
+    def test_codex_reasoning_override_is_explicit(self):
+        command = build_command("codex", "start", "/repo", reasoning="low")
+        self.assertIn('model_reasoning_effort="low"', command)
 
     def test_claude_resume_picker_and_last(self):
         self.assertEqual(build_command("claude", "resume", "/repo"), ["claude", "-r"])
@@ -56,6 +92,11 @@ class CommandTests(unittest.TestCase):
     def test_exec_command_reports_working_directory_failure(self, chdir, executable):
         with self.assertRaisesRegex(AdapterError, "missing workspace"):
             exec_command(["codex"], {}, "/missing", agent="codex")
+
+    @patch("super_agent.adapters.executable", return_value="/bin/codex")
+    @patch("super_agent.adapters.subprocess.run", side_effect=KeyboardInterrupt)
+    def test_run_command_normalizes_interrupted_login(self, run, executable):
+        self.assertEqual(run_command(["codex", "login"], {}, "/repo"), 130)
 
 
 class StatusTests(unittest.TestCase):

@@ -10,6 +10,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__
+
+CLAUDE_ROUTING_INSTRUCTIONS = (
+    "When the user asks to use, ask, consult, or have Claude review anything, call the "
+    "super_codex_claude.ask_claude MCP tool immediately and exactly once. Put the "
+    "user's request directly in the tool's request field. For current changes, diffs, "
+    "staged, or uncommitted work, set "
+    "include_diff=true. Follow-up calls continue Claude's context for this Codex session. "
+    "Set new_context=true only when the user explicitly requests a fresh Claude context. "
+    "Do not inspect files or Git first. Never invoke claude, sc ask "
+    "--agent claude, super-codex mcp-server, or MCP JSON through the shell. If the MCP "
+    "tool is unavailable, already active, fails, or is cancelled, report that and stop; "
+    "never retry automatically. Treat Claude output as advisory."
+)
 from .config import ConfigError, ensure_private_directory
 
 
@@ -208,7 +221,37 @@ def codex_live_status(env, timeout=12, sqlite_home=None):
     )
 
 
-def build_command(agent, action, cwd, prompt=None, session=None, use_last=False, model=None, native=None):
+def codex_claude_mcp_arguments(command):
+    return [
+        "-c",
+        f"mcp_servers.super_codex_claude.command={json.dumps(command)}",
+        "-c",
+        'mcp_servers.super_codex_claude.args=["mcp-server"]',
+        "-c",
+        "mcp_servers.super_codex_claude.required=true",
+        "-c",
+        'mcp_servers.super_codex_claude.enabled_tools=["ask_claude"]',
+        "-c",
+        "mcp_servers.super_codex_claude.tool_timeout_sec=180",
+        "-c",
+        'mcp_servers.super_codex_claude.tools.ask_claude.approval_mode="auto"',
+        "-c",
+        f"developer_instructions={json.dumps(CLAUDE_ROUTING_INSTRUCTIONS)}",
+    ]
+
+
+def build_command(
+    agent,
+    action,
+    cwd,
+    prompt=None,
+    session=None,
+    use_last=False,
+    model=None,
+    reasoning=None,
+    native=None,
+    mcp_command=None,
+):
     native = list(native or [])
     if agent == "codex":
         if action == "start":
@@ -221,8 +264,12 @@ def build_command(agent, action, cwd, prompt=None, session=None, use_last=False,
                 command.append("--last")
         else:
             raise AdapterError(f"Unsupported action: {action}")
+        if mcp_command:
+            command.extend(codex_claude_mcp_arguments(mcp_command))
         if model:
             command.extend(["--model", model])
+        if reasoning:
+            command.extend(["-c", f"model_reasoning_effort={json.dumps(reasoning)}"])
         command.extend(native)
         if action == "resume" and session:
             command.append(session)
@@ -350,3 +397,16 @@ def exec_command(command, env, cwd, dry_run=False, agent=None):
     except OSError as exc:
         raise AdapterError(f"Cannot launch {command[0]} in {cwd}: {exc}") from exc
     return 0
+
+
+def run_command(command, env, cwd):
+    """Run an interactive command and wait for its exit status."""
+    if not executable(command[0]):
+        raise AdapterError(f"{command[0]} is not installed or not on PATH")
+    try:
+        result = subprocess.run(command, env=env, cwd=cwd, check=False)
+    except KeyboardInterrupt:
+        return 130
+    except OSError as exc:
+        raise AdapterError(f"Cannot launch {command[0]} in {cwd}: {exc}") from exc
+    return 128 - result.returncode if result.returncode < 0 else result.returncode
