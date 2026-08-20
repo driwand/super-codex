@@ -44,6 +44,24 @@ Keep pull requests focused. Include:
 - exact verification commands and results;
 - documentation changes for user-visible behavior.
 
+## Releases
+
+Releases use annotated Semantic Versioning tags and GitHub Releases. They are not
+published to PyPI. Before tagging from `main`:
+
+1. Move the relevant changelog entries from `Unreleased` into a dated version
+   section.
+2. Set the same version in `pyproject.toml` and `src/super_agent/__init__.py`.
+3. Run the required unit, compile, and installed-entry-point checks.
+4. Run `python3 scripts/check_release_version.py vX.Y.Z`.
+5. Push the release commit and wait for normal CI to pass.
+6. Create and push an annotated tag with `git tag -a vX.Y.Z -m "vX.Y.Z"`.
+
+The tag workflow independently checks the annotation, version, changelog, tests,
+build, and both installed entry points. It creates the GitHub Release and attaches
+the wheel and source distribution only after every gate succeeds. A lightweight
+tag or mismatched version fails without publishing a release.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the repository's [MIT License](LICENSE).

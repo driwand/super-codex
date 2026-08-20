@@ -14,6 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Added configurable picker ordering and a global `select`/`main` bare-command mode.
 - Added a native Codex status line for interactive sessions with model and reasoning,
   weekly usage remaining, Git branch, and working directory.
+- Added a safe `uv`/`pipx` installer for manual install, update, verification,
+  rollback, and uninstall workflows.
+- Added `sc version` with machine-readable installed-source and Git provenance.
+- Added gated GitHub Releases for annotated, version-matched tags.
 
 ### Changed
 

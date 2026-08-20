@@ -33,23 +33,42 @@ It is not an AI agent, model proxy, token broker, or automatic quota-rotation se
 
 Windows is not currently supported. The interactive providers may support Windows independently, but Super Codex's live Codex status transport is tested on POSIX systems only.
 
-## Install
+## Install and update
 
-From a checkout, run it without installing:
+From a checkout, run Super Codex without installing:
 
 ```bash
 ./sc setup
 ```
 
-Install into an isolated tool environment with either `pipx` or `uv` if you already use one of them:
+For a global command, install into an isolated tool environment with `uv` or
+`pipx`. Install one of those managers first, then run:
 
 ```bash
-pipx install .
-# or
-uv tool install .
+./install.sh install
 ```
 
-A standard virtual environment also works:
+The installer supports macOS and Linux, never uses elevated privileges, and does
+not edit shell startup files. It reuses the manager that already owns
+`super-codex`; for a new install it prefers `uv`, then `pipx`. If both managers
+own a copy, it stops and asks you to remove one rather than guessing. The default
+source tracks the private repository's `main` branch and therefore follows the
+development channel. Your Git SSH access must already be configured.
+
+Choose the channel explicitly when reproducibility matters:
+
+```bash
+# Stable: replace vX.Y.Z with an existing release tag.
+./install.sh install \
+  --source 'git+ssh://git@github.com/driwand/super-codex.git@vX.Y.Z'
+
+# Local checkout, useful while developing.
+./install.sh install --source .
+```
+
+Release tags are the stable channel; `main` is the development channel. This
+project is not published to PyPI. A standard virtual environment remains
+available for a checkout-specific installation:
 
 ```bash
 python3 -m venv .venv
@@ -58,6 +77,37 @@ python -m pip install .
 ```
 
 The distribution name is `super-codex`. Installation provides both `sc` and `super-codex`; this guide uses the shorter `sc` command. The former `sa` name deliberately is not installed because macOS already reserves it for process accounting.
+
+Updates are manual. Refresh the source already recorded by the tool manager:
+
+```bash
+./install.sh update
+./install.sh verify
+```
+
+For a `main` install, `update` advances to the newest commit. A tag is immutable,
+so move a stable install to a newer release—or roll back—by running `install`
+again with the desired tag:
+
+```bash
+./install.sh install \
+  --source 'git+ssh://git@github.com/driwand/super-codex.git@vX.Y.Z'
+```
+
+Confirm exactly what is running, including the requested Git revision and commit
+when the installer metadata provides them:
+
+```bash
+sc version
+sc version --json
+```
+
+Uninstall the commands without deleting Super Codex configuration or provider
+profiles:
+
+```bash
+./install.sh uninstall
+```
 
 ## Quick start
 
