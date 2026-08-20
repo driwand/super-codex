@@ -115,6 +115,19 @@ class InstallScriptTests(unittest.TestCase):
             "uv tool upgrade --reinstall super-codex\n",
         )
 
+    def test_install_can_switch_existing_pipx_install_to_a_new_tag(self):
+        self.fake_pipx()
+        self.add_entry_points()
+        (self.root / "pipx" / "venvs" / "super-codex").mkdir(parents=True)
+        source = "git+ssh://git@github.com/driwand/super-codex.git@v0.4.0"
+
+        result = self.run_installer("install", "--source", source)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.log.read_text(encoding="utf-8"), f"pipx install --force {source}\n"
+        )
+
     def test_refuses_ambiguous_dual_ownership(self):
         self.fake_uv()
         self.fake_pipx()

@@ -5,6 +5,8 @@ set -eu
 PACKAGE="super-codex"
 DEFAULT_SOURCE="git+ssh://git@github.com/driwand/super-codex.git@main"
 SOURCE=${SUPER_CODEX_INSTALL_SOURCE:-$DEFAULT_SOURCE}
+SOURCE_SET=false
+if [ "${SUPER_CODEX_INSTALL_SOURCE+x}" = x ]; then SOURCE_SET=true; fi
 MANAGER=""
 ACTION="install"
 
@@ -102,6 +104,7 @@ while [ "$#" -gt 0 ]; do
         --source)
             [ "$#" -ge 2 ] || fail "--source requires a package source"
             SOURCE=$2
+            SOURCE_SET=true
             shift 2
             ;;
         -h|--help)
@@ -128,20 +131,28 @@ case "$ACTION" in
         manager=$(select_manager)
         owner=$(installed_manager)
         if [ "$manager" = uv ]; then
-            if [ "$owner" = uv ]; then
+            if [ "$owner" = uv ] && [ "$SOURCE_SET" = false ]; then
                 uv tool upgrade --reinstall "$PACKAGE"
             else
-                uv tool install "$SOURCE"
+                if [ "$owner" = uv ]; then
+                    uv tool install --reinstall "$SOURCE"
+                else
+                    uv tool install "$SOURCE"
+                fi
             fi
-        elif [ "$owner" = pipx ]; then
+        elif [ "$owner" = pipx ] && [ "$SOURCE_SET" = false ]; then
             pipx reinstall "$PACKAGE"
         else
-            pipx install "$SOURCE"
+            if [ "$owner" = pipx ]; then
+                pipx install --force "$SOURCE"
+            else
+                pipx install "$SOURCE"
+            fi
         fi
         verify_installation
         ;;
     update)
-        [ "$SOURCE" = "$DEFAULT_SOURCE" ] || fail "--source is only valid with install"
+        [ "$SOURCE_SET" = false ] || fail "--source is only valid with install"
         manager=$(installed_manager)
         [ -n "$manager" ] || fail "$PACKAGE is not managed by uv or pipx; run install first"
         if [ -n "$MANAGER" ] && [ "$MANAGER" != "$manager" ]; then
