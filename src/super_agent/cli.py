@@ -149,17 +149,24 @@ def launcher_command():
 
 def _profile_row(store, config, agent, name, live):
     data = config["profiles"][agent][name]
-    env = store.environment(agent, name, config)
-    status = auth_status(agent, env)
     row = {
         "agent": agent,
         "profile": name,
         "label": data.get("label", name),
         "isolation": data["isolation"],
-        "authenticated": status.authenticated,
-        "authDetail": status.detail,
+        "authenticated": False,
+        "authDetail": "",
         "live": [],
     }
+    try:
+        env = store.environment(agent, name, config)
+        status = auth_status(agent, env)
+    except ConfigError as exc:
+        row["authDetail"] = f"profile unavailable: {exc}"
+        row["error"] = str(exc)
+        return row
+    row["authenticated"] = status.authenticated
+    row["authDetail"] = status.detail
     if live and agent == "codex" and status.authenticated:
         try:
             sqlite_home = store.home / "runtime" / "codex" / name
@@ -196,7 +203,10 @@ def _picker_lines(rows, selected_index):
     ]
     for index, row in enumerate(rows):
         marker = ">" if index == selected_index else " "
-        state = "ready" if row["authenticated"] else "login needed"
+        if row.get("error"):
+            state = "unavailable"
+        else:
+            state = "ready" if row["authenticated"] else "login needed"
         lines.append(f"{marker} {row['profile']:<4} {row['label']}  [{state}]")
         details = row["live"] or ([row["authDetail"]] if row["authDetail"] else [])
         for detail in details:
@@ -204,7 +214,7 @@ def _picker_lines(rows, selected_index):
     return lines
 
 
-def choose_profile(rows, input_stream=None, output_stream=None):
+def choose_profile(rows, input_stream=None, output_stream=None, initial_profile=None):
     input_stream = input_stream or sys.stdin
     output_stream = output_stream or sys.stdout
     if not rows:
@@ -214,7 +224,14 @@ def choose_profile(rows, input_stream=None, output_stream=None):
             "The account picker requires a terminal. Use `sc main`, `sc 2`, or "
             "set `sc config mode main`."
         )
-    selected_index = 0
+    selected_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if row["profile"] == initial_profile
+        ),
+        0,
+    )
     descriptor = input_stream.fileno()
     previous = termios.tcgetattr(descriptor)
     output_stream.write("\x1b[?1049h\x1b[?25l")
@@ -229,23 +246,42 @@ def choose_profile(rows, input_stream=None, output_stream=None):
             output_stream.write("\x1b[H\x1b[2J" + rendered + "\r\n")
             output_stream.flush()
             key = os.read(descriptor, 1)
+            if key == b"":
+                return None
             if key in (b"\r", b"\n"):
                 return rows[selected_index]["profile"]
             if key in (b"q", b"Q", b"\x03", b"\x1b"):
                 if key == b"\x1b":
                     suffix = b""
-                    for _ in range(2):
+                    reached_eof = False
+                    for _ in range(16):
                         if not select.select([descriptor], [], [], 0.05)[0]:
                             break
-                        suffix += os.read(descriptor, 1)
+                        part = os.read(descriptor, 1)
+                        if part == b"":
+                            reached_eof = True
+                            break
+                        suffix += part
+                        if (
+                            len(suffix) >= 2
+                            and suffix[:1] in (b"[", b"O")
+                            and 0x40 <= part[0] <= 0x7E
+                        ):
+                            break
+                        if len(suffix) == 1 and suffix[:1] not in (b"[", b"O"):
+                            break
+                    if reached_eof:
+                        return None
                     if suffix == b"[A":
                         selected_index = (selected_index - 1) % len(rows)
                         continue
                     if suffix == b"[B":
                         selected_index = (selected_index + 1) % len(rows)
                         continue
+                    if suffix:
+                        continue
                 return None
-            if key in b"12345":
+            if key in (b"1", b"2", b"3", b"4", b"5"):
                 requested = "main" if key == b"1" else key.decode("ascii")
                 if any(row["profile"] == requested for row in rows):
                     return requested
@@ -260,7 +296,10 @@ def choose_profile(rows, input_stream=None, output_stream=None):
 def print_rows(rows, active=None):
     for row in rows:
         marker = "*" if active == (row["agent"], row["profile"]) else " "
-        auth = "ready" if row["authenticated"] else "login needed"
+        if row.get("error"):
+            auth = "unavailable"
+        else:
+            auth = "ready" if row["authenticated"] else "login needed"
         print(
             f"{marker} {row['agent']}/{row['profile']}  {row['label']}  "
             f"[{row['isolation']}, {auth}]"
@@ -300,8 +339,14 @@ def run_setup(store, config, cwd):
                 )
     if not executable("claude"):
         steps.append("Optional: install Claude Code to enable the fallback agent.")
-    elif not row_map[("claude", "main")]["authenticated"]:
-        steps.append("Authenticate Claude: `sc login --agent claude --profile main`.")
+    else:
+        claude_profile = config["agentDefaults"]["claude"]
+        claude_row = row_map.get(("claude", claude_profile))
+        if claude_row is None or not claude_row["authenticated"]:
+            steps.append(
+                "Authenticate Claude: "
+                f"`sc login --agent claude --profile {claude_profile}`."
+            )
     if not steps:
         steps.append("Setup is complete. Run `sc` to start Codex.")
     for index, step in enumerate(steps, 1):
@@ -398,7 +443,11 @@ def run_doctor(store, config, cwd, live):
     print(f"OK   selection: {agent}/{profile} ({matched or 'global'})")
     rows = profile_rows(store, config, live=live)
     for row in rows:
-        state = "OK" if row["authenticated"] else "WARN"
+        if row.get("error"):
+            failures += 1
+            state = "FAIL"
+        else:
+            state = "OK" if row["authenticated"] else "WARN"
         print(f"{state:<4} {row['agent']}/{row['profile']}: {row['authDetail']}")
         for line in row["live"]:
             print(f"     {line}")
@@ -422,24 +471,27 @@ def main(argv=None):
         if args.command == "setup":
             return run_setup(store, config, cwd)
         if args.command in ("start", "ask", "resume"):
-            if bare_invocation and config["startupMode"] == "select":
+            if bare_invocation:
+                agent, profile, _ = store.selection(config, cwd)
+            if (
+                bare_invocation
+                and config["startupMode"] == "select"
+                and agent == "codex"
+            ):
                 targets = {
                     ("codex", name) for name in store.ordered_profile_names(config, "codex")
                 }
                 try:
                     profile = choose_profile(
-                        profile_rows(store, config, live=True, only=targets)
+                        profile_rows(store, config, live=True, only=targets),
+                        initial_profile=profile,
                     )
                 except KeyboardInterrupt:
                     profile = None
                 if profile is None:
                     print("Account selection cancelled.")
                     return 130
-                agent = "codex"
-            elif bare_invocation:
-                agent, profile = "codex", "main"
-                store.require_profile(config, agent, profile)
-            else:
+            elif not bare_invocation:
                 agent, profile, _ = selected(store, config, args, cwd)
             env = store.environment(agent, profile, config)
             command = build_command(

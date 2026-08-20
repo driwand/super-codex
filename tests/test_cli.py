@@ -264,6 +264,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("sc login --profile 2", output)
 
+    @patch("super_agent.cli.executable", return_value="/bin/agent")
+    @patch("super_agent.cli.profile_rows")
+    def test_setup_uses_configured_claude_default_profile(
+        self, profile_rows, executable
+    ):
+        config = Store(self.state).load()
+        Store(self.state).add_profile(config, "claude", "reviewer", "Reviewer")
+        config["agentDefaults"]["claude"] = "reviewer"
+        Store(self.state).save(config)
+        profile_rows.return_value = [
+            {"agent": "codex", "profile": "main", "label": "Codex 1", "isolation": "shared", "authenticated": True, "authDetail": "ready", "live": []},
+            {"agent": "claude", "profile": "main", "label": "Claude", "isolation": "shared", "authenticated": True, "authDetail": "ready", "live": []},
+            {"agent": "claude", "profile": "reviewer", "label": "Reviewer", "isolation": "isolated", "authenticated": False, "authDetail": "not logged in", "live": []},
+        ]
+        code, output = self.output(["setup"])
+        self.assertEqual(code, 0)
+        self.assertIn("--profile reviewer", output)
+
     def test_number_is_a_direct_start_shorthand(self):
         self.add_account_2()
         code, output = self.output(["2", "--dry-run"])
@@ -287,12 +305,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(config["profileOrder"]["codex"], ["3", "main", "2"])
 
     def test_config_mode_changes_bare_sc_behavior(self):
+        self.add_account_2()
+        self.output(["use", "codex", "2"])
         code, output = self.output(["config", "mode", "main"])
         self.assertEqual((code, output), (0, "main\n"))
         with patch("super_agent.cli.exec_command", return_value=0) as execute:
             code, _ = self.output([])
         self.assertEqual(code, 0)
         self.assertEqual(execute.call_args.args[-1], "codex")
+        self.assertIn("profiles/codex/2", execute.call_args.args[1]["CODEX_HOME"])
+
+    @patch("super_agent.cli.choose_profile")
+    @patch("super_agent.cli.exec_command", return_value=0)
+    def test_bare_sc_launches_bound_claude_without_codex_picker(
+        self, execute, choose
+    ):
+        self.output(["use", "claude", "main"])
+        code, _ = self.output([])
+        self.assertEqual(code, 0)
+        choose.assert_not_called()
+        self.assertEqual(execute.call_args.args[-1], "claude")
 
     @patch("super_agent.cli.exec_command", return_value=0)
     @patch("super_agent.cli.choose_profile", return_value="2")
@@ -307,7 +339,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(rows.call_args.kwargs["live"])
         self.assertEqual(choose.call_args.args[0], rows.return_value)
+        self.assertEqual(choose.call_args.kwargs["initial_profile"], "main")
         self.assertIn("profiles/codex/2", execute.call_args.args[1]["CODEX_HOME"])
+
+    @patch("super_agent.cli.exec_command", return_value=0)
+    @patch("super_agent.cli.choose_profile", return_value="2")
+    @patch("super_agent.cli.profile_rows")
+    def test_bare_sc_picker_preselects_workspace_binding(self, rows, choose, execute):
+        self.add_account_2()
+        self.output(["use", "codex", "2"])
+        rows.return_value = [
+            {"agent": "codex", "profile": "main"},
+            {"agent": "codex", "profile": "2"},
+        ]
+        code, _ = self.output([])
+        self.assertEqual(code, 0)
+        self.assertEqual(choose.call_args.kwargs["initial_profile"], "2")
 
     def test_picker_displays_identity_and_current_limits(self):
         lines = _picker_lines(
@@ -345,6 +392,63 @@ class CliTests(unittest.TestCase):
             selected = choose_profile(rows, FakeTTY(), output)
         self.assertEqual(selected, "2")
         self.assertIn("\r\n", output.getvalue())
+
+    def test_picker_ignores_other_complete_escape_sequences(self):
+        class FakeTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 99
+
+        rows = [
+            {"profile": "main", "label": "Work", "authenticated": True, "authDetail": "", "live": []},
+            {"profile": "2", "label": "Personal", "authenticated": True, "authDetail": "", "live": []},
+        ]
+        with patch("super_agent.cli.termios.tcgetattr", return_value=[]), patch(
+            "super_agent.cli.termios.tcsetattr"
+        ), patch("super_agent.cli.tty.setcbreak"), patch(
+            "super_agent.cli.select.select", return_value=([99], [], [])
+        ), patch(
+            "super_agent.cli.os.read",
+            side_effect=[b"\x1b", b"[", b"6", b"~", b"\r"],
+        ):
+            selected = choose_profile(rows, FakeTTY(), FakeTTY(), initial_profile="2")
+        self.assertEqual(selected, "2")
+
+    def test_picker_eof_cancels(self):
+        class FakeTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 99
+
+        rows = [
+            {"profile": "main", "label": "Work", "authenticated": True, "authDetail": "", "live": []}
+        ]
+        with patch("super_agent.cli.termios.tcgetattr", return_value=[]), patch(
+            "super_agent.cli.termios.tcsetattr"
+        ), patch("super_agent.cli.tty.setcbreak"), patch(
+            "super_agent.cli.os.read", return_value=b""
+        ):
+            self.assertIsNone(choose_profile(rows, FakeTTY(), FakeTTY()))
+
+    def test_unusable_profile_does_not_abort_listing_or_doctor(self):
+        self.add_account_2()
+        sessions = self.state / "profiles" / "codex" / "2" / "sessions"
+        sessions.unlink()
+        sessions.mkdir()
+        (sessions / "existing.jsonl").write_text("local", encoding="utf-8")
+
+        code, output = self.output(["profiles"])
+        self.assertEqual(code, 0)
+        self.assertIn("codex/2", output)
+        self.assertIn("profile unavailable", output)
+
+        code, output = self.output(["doctor"])
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL codex/2", output)
 
     def test_picker_ctrl_c_cancels_without_traceback(self):
         class FakeTTY(io.StringIO):

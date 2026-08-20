@@ -99,7 +99,9 @@ sc main
 sc 2
 ```
 
-The picker is the default global behavior. Make bare `sc` always launch `main`, or restore the picker, with:
+The picker is the default global behavior for Codex selections. Make bare `sc`
+launch the profile selected by the current workspace or global binding without a
+picker, or restore the picker, with:
 
 ```bash
 sc config mode main
@@ -301,8 +303,8 @@ Use the CLI to inspect the schema-versioned registry and change bare-command beh
 sc config path
 sc config show
 sc config mode        # print select or main
-sc config mode main   # bare sc always launches main
-sc config mode select # bare sc opens the live picker
+sc config mode main   # bare sc launches the selected binding directly
+sc config mode select # Codex bindings open the live picker
 ```
 
 The current config schema is version 2. This profile model is a clean break: schema-v1 registries and the former `second` profile name are not migrated. Super Codex always uses `~/.config/super-codex`; an old `~/.config/super-agent-control` directory is ignored and left untouched. Provider credential files are never read or copied by Super Codex.
