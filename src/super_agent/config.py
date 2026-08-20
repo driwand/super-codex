@@ -27,8 +27,24 @@ def absolute_path(value):
 
 def ensure_private_directory(path, parents=True):
     path = Path(path)
+    if parents:
+        missing = []
+        current = path
+        while True:
+            try:
+                current.lstat()
+                break
+            except FileNotFoundError:
+                missing.append(current)
+                if current.parent == current:
+                    break
+                current = current.parent
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect private directory {current}: {exc}") from exc
+        for directory in reversed(missing):
+            ensure_private_directory(directory, parents=False)
     try:
-        path.mkdir(parents=parents, exist_ok=True, mode=0o700)
+        path.mkdir(parents=False, exist_ok=True, mode=0o700)
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(os.fspath(path), flags)
     except OSError as exc:
@@ -134,7 +150,12 @@ class Store:
 
     def validate(self, config):
         if not isinstance(config, dict) or config.get("version") != 2:
-            raise ConfigError("Unsupported or invalid config version")
+            version = config.get("version") if isinstance(config, dict) else None
+            raise ConfigError(
+                f"Unsupported or invalid config version {version!r} in "
+                f"{self.config_path}; remove that file to recreate a schema-version 2 "
+                "configuration"
+            )
         if config.get("startupMode") not in STARTUP_MODES:
             raise ConfigError("Config startupMode must be 'select' or 'main'")
         profiles = config.get("profiles")
@@ -187,12 +208,20 @@ class Store:
                 raise ConfigError(f"Config profileOrder.{agent} must be a list")
             if len(order) != len(set(order)) or set(order) != set(profiles[agent]):
                 raise ConfigError(f"Config profileOrder.{agent} must list every profile once")
-        defaults = config.get("defaults", {})
+        defaults = config.get("defaults")
+        if not isinstance(defaults, dict):
+            raise ConfigError("Config defaults must be an object")
+        if not isinstance(defaults.get("agent"), str) or not isinstance(
+            defaults.get("profile"), str
+        ):
+            raise ConfigError("Config defaults.agent and defaults.profile must be strings")
         self.require_profile(config, defaults.get("agent"), defaults.get("profile"))
         agent_defaults = config.get("agentDefaults")
         if not isinstance(agent_defaults, dict):
             raise ConfigError("Config agentDefaults must be an object")
         for agent in AGENTS:
+            if not isinstance(agent_defaults.get(agent), str):
+                raise ConfigError(f"Config agentDefaults.{agent} must be a string")
             self.require_profile(config, agent, agent_defaults.get(agent))
         workspaces = config.get("workspaces", {})
         if not isinstance(workspaces, dict):
@@ -380,8 +409,10 @@ class Store:
                 self._share_codex_sessions(home, shared_home)
                 env[SHARED_CODEX_HOME_ENV] = str(shared_home)
             env[HOME_ENV[agent]] = str(home)
-        elif agent == "codex":
-            env[SHARED_CODEX_HOME_ENV] = str(self.shared_codex_home(env))
+        else:
+            if agent == "codex":
+                env[SHARED_CODEX_HOME_ENV] = str(self.shared_codex_home(env))
+            env.pop(HOME_ENV[agent], None)
         return env
 
     def selection(self, config, workspace, agent=None, profile=None):

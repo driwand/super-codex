@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from super_agent.config import ConfigError, Store, default_config, resolve_home
+from super_agent.config import (
+    ConfigError,
+    Store,
+    default_config,
+    ensure_private_directory,
+    resolve_home,
+)
 
 
 class StoreTests(unittest.TestCase):
@@ -78,11 +84,17 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "already contains data"):
             self.store.environment("codex", "2", config)
 
-    def test_shared_profile_inherits_provider_environment(self):
+    def test_shared_profile_clears_inherited_provider_environment(self):
         config = self.store.load()
-        with patch.dict(os.environ, {"CODEX_HOME": "/inherited"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"CODEX_HOME": "/inherited", "CLAUDE_CONFIG_DIR": "/inherited-claude"},
+            clear=True,
+        ):
             env = self.store.environment("codex", "main", config)
-        self.assertEqual(env["CODEX_HOME"], "/inherited")
+            claude_env = self.store.environment("claude", "main", config)
+        self.assertNotIn("CODEX_HOME", env)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", claude_env)
 
     def test_nearest_workspace_binding_wins(self):
         config = self.store.load()
@@ -121,6 +133,17 @@ class StoreTests(unittest.TestCase):
         config = default_config()
         del config["agentDefaults"]["codex"]
         with self.assertRaises(ConfigError):
+            self.store.validate(config)
+
+    def test_malformed_defaults_are_rejected_as_config_errors(self):
+        config = default_config()
+        config["defaults"] = None
+        with self.assertRaisesRegex(ConfigError, "defaults must be an object"):
+            self.store.validate(config)
+
+        config = default_config()
+        config["agentDefaults"]["codex"] = []
+        with self.assertRaisesRegex(ConfigError, "agentDefaults.codex must be a string"):
             self.store.validate(config)
 
     def test_profile_label_can_be_changed(self):
@@ -207,8 +230,17 @@ class StoreTests(unittest.TestCase):
     def test_schema_v1_is_rejected_without_legacy_migration(self):
         config = default_config()
         config["version"] = 1
-        with self.assertRaisesRegex(ConfigError, "Unsupported"):
+        with self.assertRaisesRegex(ConfigError, str(self.store.config_path)):
             self.store.save(config)
+
+    def test_nested_private_directories_are_created_with_private_modes(self):
+        existing = Path(self.temporary.name) / "existing"
+        existing.mkdir(mode=0o755)
+        nested = existing / "runtime" / "codex" / "main"
+        ensure_private_directory(nested)
+        for path in (existing / "runtime", existing / "runtime" / "codex", nested):
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(existing.stat().st_mode), 0o755)
 
 
 if __name__ == "__main__":
