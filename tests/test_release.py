@@ -9,6 +9,7 @@ SCRIPT = ROOT / "scripts" / "check_release_version.py"
 sys.path.insert(0, str(ROOT / "src"))
 
 from super_agent import __version__
+from scripts.check_release_version import unreleased_has_entries
 
 
 class ReleaseTests(unittest.TestCase):
@@ -27,11 +28,17 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"v{__version__}", result.stdout)
 
-    def test_release_tag_is_rejected_until_unreleased_entries_are_moved(self):
-        result = self.run_check(f"v{__version__}")
+    def test_unreleased_entries_are_detected(self):
+        changelog = """# Changelog
 
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("still has entries under Unreleased", result.stderr)
+## [Unreleased]
+
+- Pending release note.
+
+## [1.0.0]
+"""
+
+        self.assertTrue(unreleased_has_entries(changelog))
 
     def test_mismatched_release_tag_is_rejected(self):
         result = self.run_check("v999.0.0")

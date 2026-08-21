@@ -1,6 +1,6 @@
 [project]
 name = "super-codex"
-version = "0.3.2"
+version = "0.4.0"
 description = "A Codex-first account and workspace control plane for coding agents"
 readme = "README.md"
 requires-python = ">=3.9"
