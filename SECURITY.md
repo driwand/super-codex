@@ -45,4 +45,13 @@ Profile isolation does not isolate operating-system credentials or resources sha
 - Do not place `SUPER_AGENT_HOME` in cloud-synchronized or shared storage.
 - Keep the state directory accessible only to your operating-system user.
 - Do not commit `.test-state`, provider homes, or generated session data.
+- Install the checksum-pinned scanner with `python3 scripts/install_gitleaks.py`, enable
+  the repository hooks with `git config core.hooksPath .githooks`, and register private
+  names or work identifiers with
+  `python3 scripts/check_sensitive_data.py --register-sensitive-term`.
+- Run `python3 scripts/check_sensitive_data.py --history` before publishing a branch or
+  tag, followed by `python3 scripts/run_gitleaks.py --history`. Findings redact matched
+  values by design, commit metadata is included, and Gitleaks must pass a detection
+  self-test before the real scan. CI and releases require the private digest through
+  the `SUPER_CODEX_SENSITIVE_TERM_DIGESTS` repository secret and fail if it is absent.
 - Use provider accounts according to provider terms and organization policies.

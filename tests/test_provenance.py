@@ -49,7 +49,7 @@ class ProvenanceTests(unittest.TestCase):
     def test_redacts_credentials_from_direct_url(self, find_distribution):
         find_distribution.return_value = self.distribution(
             direct_url={
-                "url": "https://secret-token@github.com/driwand/super-codex.git",
+                "url": "https://secret-token@example.com/driwand/super-codex.git",
                 "vcs_info": {"vcs": "git", "commit_id": "abc123"},
             }
         )
@@ -57,7 +57,7 @@ class ProvenanceTests(unittest.TestCase):
         result = installation_provenance()
 
         self.assertEqual(
-            result["source"], "https://github.com/driwand/super-codex.git"
+            result["source"], "https://example.com/driwand/super-codex.git"
         )
         self.assertNotIn("secret-token", json.dumps(result))
 
