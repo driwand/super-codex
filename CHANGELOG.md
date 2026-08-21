@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   atomic update, rollback, and uninstall workflows.
 - Added `sc version` with machine-readable installed-source and Git provenance.
 - Added gated GitHub Releases for annotated, version-matched tags.
+- Added fail-closed pre-commit, pre-push, CI, and release scans using a
+  checksum-pinned Gitleaks binary plus repository-specific privacy checks.
+- Added gitignored, one-way sensitive-term registration so private names can be
+  blocked without storing their plaintext in the repository.
 
 ### Changed
 

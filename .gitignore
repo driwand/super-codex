@@ -10,3 +10,22 @@ htmlcov/
 .DS_Store
 .schema-probe/
 .test-state/
+.sensitive-hashes.local
+.tools/
+
+# Local credentials and provider/runtime state must never enter Git.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log

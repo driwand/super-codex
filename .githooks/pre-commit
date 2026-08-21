@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(git rev-parse --show-toplevel)
+python3 "$repository_root/scripts/check_sensitive_data.py" --staged
+exec python3 "$repository_root/scripts/run_gitleaks.py" --staged
