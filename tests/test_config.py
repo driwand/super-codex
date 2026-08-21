@@ -28,7 +28,12 @@ class StoreTests(unittest.TestCase):
         (self.codex_home / "sessions").mkdir(parents=True)
         (self.codex_home / "archived_sessions").mkdir()
         self.environment = patch.dict(
-            os.environ, {"CODEX_HOME": str(self.codex_home)}, clear=False
+            os.environ,
+            {
+                "CODEX_HOME": str(self.codex_home),
+                SHARED_CODEX_HOME_ENV: str(self.codex_home),
+            },
+            clear=False,
         )
         self.environment.start()
         self.store = Store(self.home)
@@ -181,6 +186,29 @@ class StoreTests(unittest.TestCase):
         loaded = self.store.load()
         self.assertEqual(loaded["defaults"], {"agent": "codex", "profile": "2"})
         self.assertEqual(loaded["agentDefaults"]["codex"], "2")
+
+    def test_main_profile_updates_defaults_without_changing_profile_storage(self):
+        config = self.store.load()
+        self.store.add_profile(config, "codex", "2", "Personal")
+        profiles = json.loads(json.dumps(config["profiles"]))
+        self.store.set_main_profile(config, "codex", "2")
+        loaded = self.store.load()
+        self.assertEqual(loaded["defaults"], {"agent": "codex", "profile": "2"})
+        self.assertEqual(loaded["agentDefaults"]["codex"], "2")
+        self.assertEqual(loaded["profiles"], profiles)
+
+    def test_main_profile_for_inactive_agent_preserves_global_agent(self):
+        config = self.store.load()
+        self.store.add_profile(config, "claude", "reviewer", "Reviewer")
+        self.store.set_main_profile(config, "claude", "reviewer")
+        loaded = self.store.load()
+        self.assertEqual(loaded["defaults"], {"agent": "codex", "profile": "main"})
+        self.assertEqual(loaded["agentDefaults"]["claude"], "reviewer")
+
+    def test_main_profile_must_exist(self):
+        config = self.store.load()
+        with self.assertRaisesRegex(ConfigError, "Unknown profile"):
+            self.store.set_main_profile(config, "codex", "2")
 
     def test_missing_agent_default_is_rejected(self):
         config = default_config()

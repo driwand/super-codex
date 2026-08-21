@@ -508,6 +508,14 @@ class Store:
         data["label"] = display_label
         self.save(config)
 
+    def set_main_profile(self, config, agent, profile):
+        profile = self.normalize_profile(agent, profile)
+        self.require_profile(config, agent, profile)
+        config.setdefault("agentDefaults", {})[agent] = profile
+        if config["defaults"]["agent"] == agent:
+            config["defaults"]["profile"] = profile
+        self.save(config)
+
     def set_profile_order(self, config, agent, profiles):
         if agent not in AGENTS:
             raise ConfigError(f"Unsupported agent: {agent}")

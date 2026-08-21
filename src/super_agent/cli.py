@@ -32,7 +32,7 @@ def parser():
     root = argparse.ArgumentParser(
         prog="sc",
         description="A Codex-first account and workspace control plane for coding agents.",
-        epilog="Examples: sc | sc 2 | sc config mode main | sc profile order codex main 3 2",
+        epilog="Examples: sc | sc main | sc profile main codex 2 | sc profile order codex main 3 2",
     )
     root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = root.add_subparsers(dest="command")
@@ -99,6 +99,9 @@ def parser():
     label.add_argument("agent", choices=AGENTS)
     label.add_argument("name")
     label.add_argument("label")
+    main_profile = profile_commands.add_parser("main", help="Designate the main account")
+    main_profile.add_argument("agent", choices=AGENTS)
+    main_profile.add_argument("name")
     order = profile_commands.add_parser("order", help="Set the profile picker order")
     order.add_argument("agent", choices=AGENTS)
     order.add_argument("names", nargs="+")
@@ -164,6 +167,7 @@ def _profile_row(store, config, agent, name, live):
         "agent": agent,
         "profile": name,
         "label": data.get("label", name),
+        "main": config["agentDefaults"][agent] == name,
         "isolation": data["isolation"],
         "authenticated": False,
         "authDetail": "",
@@ -218,7 +222,8 @@ def _picker_lines(rows, selected_index):
             state = "unavailable"
         else:
             state = "ready" if row["authenticated"] else "login needed"
-        lines.append(f"{marker} {row['profile']:<4} {row['label']}  [{state}]")
+        main = " (main)" if row.get("main") else ""
+        lines.append(f"{marker} {row['profile']:<4} {row['label']}{main}  [{state}]")
         details = row["live"] or ([row["authDetail"]] if row["authDetail"] else [])
         for detail in details:
             lines.append(f"      {detail}")
@@ -311,8 +316,9 @@ def print_rows(rows, active=None):
             auth = "unavailable"
         else:
             auth = "ready" if row["authenticated"] else "login needed"
+        main = " (main)" if row.get("main") else ""
         print(
-            f"{marker} {row['agent']}/{row['profile']}  {row['label']}  "
+            f"{marker} {row['agent']}/{row['profile']}  {row['label']}{main}  "
             f"[{row['isolation']}, {auth}]"
         )
         if row["authDetail"]:
@@ -468,7 +474,10 @@ def run_doctor(store, config, cwd, live):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     bare_invocation = not argv
-    if argv and argv[0] in set(CODEX_PROFILE_NAMES) | {"1"}:
+    main_shorthand = bool(argv and argv[0] == "main")
+    if main_shorthand:
+        argv = ["start"] + argv[1:]
+    elif argv and argv[0] in set(CODEX_PROFILE_NAMES) | {"1"}:
         argv = ["start", "--profile", argv[0]] + argv[1:]
     if bare_invocation:
         argv = ["start"]
@@ -497,7 +506,9 @@ def main(argv=None):
         if args.command == "setup":
             return run_setup(store, config, cwd)
         if args.command in ("start", "ask", "resume"):
-            if bare_invocation:
+            if main_shorthand and not (args.agent or args.profile):
+                agent, profile = "codex", config["agentDefaults"]["codex"]
+            elif bare_invocation:
                 agent, profile, _ = store.selection(config, cwd)
             if (
                 bare_invocation
@@ -517,7 +528,9 @@ def main(argv=None):
                 if profile is None:
                     print("Account selection cancelled.")
                     return 130
-            elif not bare_invocation:
+            elif not bare_invocation and (
+                not main_shorthand or args.agent or args.profile
+            ):
                 agent, profile, _ = selected(store, config, args, cwd)
             env = store.environment(agent, profile, config)
             command = build_command(
@@ -610,6 +623,11 @@ def main(argv=None):
         if args.command == "profile" and args.profile_command == "label":
             store.set_label(config, args.agent, args.name, args.label)
             print(f"Labeled {args.agent}/{args.name} as {args.label.strip()}")
+            return 0
+        if args.command == "profile" and args.profile_command == "main":
+            profile = store.normalize_profile(args.agent, args.name)
+            store.set_main_profile(config, args.agent, profile)
+            print(f"Main {args.agent.capitalize()} account: {args.agent}/{profile}")
             return 0
         if args.command == "profile" and args.profile_command == "order":
             store.set_profile_order(config, args.agent, args.names)

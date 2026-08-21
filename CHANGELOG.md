@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-21
+
+### Added
+
+- Added `sc profile main <agent> <profile>` to designate a main account without moving
+  provider state, mark it in profile listings and the picker, and route `sc main` to the
+  designated Codex account.
+- Added managed Claude jobs with quick, standard, and deep execution profiles, automatic
+  background continuation, local status monitoring, and explicit cancellation.
+
+### Changed
+
+- Claude dollar budgets are now opt-in through an explicit `max_budget_usd` request or
+  `SUPER_CODEX_CLAUDE_MAX_BUDGET_USD`; no implicit dollar limit is passed to Claude.
+
 ## [0.4.0] - 2026-08-21
 
 ### Added

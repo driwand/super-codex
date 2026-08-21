@@ -75,10 +75,17 @@ class CommandTests(unittest.TestCase):
         self.assertIn('mcp_servers.super_codex_claude.args=["mcp-server"]', command)
         self.assertIn("mcp_servers.super_codex_claude.required=true", command)
         self.assertIn(
-            'mcp_servers.super_codex_claude.enabled_tools=["ask_claude"]', command
+            'mcp_servers.super_codex_claude.enabled_tools='
+            '["ask_claude","claude_job_status","cancel_claude_job"]',
+            command,
         )
         self.assertIn(
             'mcp_servers.super_codex_claude.tools.ask_claude.approval_mode="auto"',
+            command,
+        )
+        self.assertIn(
+            'mcp_servers.super_codex_claude.tools.'
+            'claude_job_status.approval_mode="auto"',
             command,
         )
         self.assertIn("mcp_servers.super_codex_claude.tool_timeout_sec=180", command)

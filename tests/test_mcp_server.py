@@ -16,13 +16,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from super_agent.adapters import AdapterError
 from super_agent.mcp_server import (
+    CANCEL_TOOL_NAME,
+    ClaudeJobManager,
     ClaudeSessionRegistry,
-    DEFAULT_MAX_BUDGET_USD,
     DEFAULT_MAX_OUTPUT_TOKENS,
+    EXECUTION_PROFILES,
     MAX_DIFF_CHARS,
     MAX_OUTPUT_CHARS,
+    STATUS_TOOL_NAME,
     TOOL_NAME,
     _current_change_context,
+    _stream_claude_output,
     _terminate_process_group,
     consultation_lock,
     handle_request,
@@ -62,6 +66,10 @@ class McpProtocolTests(unittest.TestCase):
         self.assertIn("request", tool["inputSchema"]["properties"])
         self.assertTrue(tool["annotations"]["readOnlyHint"])
         self.assertFalse(tool["annotations"]["destructiveHint"])
+        self.assertEqual(
+            [item["name"] for item in listed["result"]["tools"]],
+            [TOOL_NAME, STATUS_TOOL_NAME, CANCEL_TOOL_NAME],
+        )
 
     def test_tool_call_returns_claude_as_advisory_text(self):
         consult = Mock(return_value="Independent review")
@@ -257,6 +265,224 @@ class McpProtocolTests(unittest.TestCase):
         )
         self.assertTrue(cancelled.is_set())
 
+    def test_status_tool_reads_the_existing_job(self):
+        manager = Mock()
+        manager.status.return_value = {"job_id": "job-1", "state": "running"}
+        response = handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": STATUS_TOOL_NAME,
+                    "arguments": {"job_id": "job-1", "wait_seconds": 10},
+                },
+            },
+            self.store,
+            "/repo",
+            job_manager=manager,
+        )
+        manager.status.assert_called_once_with("job-1", 10)
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(payload["state"], "running")
+
+    def test_cancel_tool_targets_the_existing_job(self):
+        manager = Mock()
+        manager.cancel.return_value = {"job_id": "job-1", "state": "running"}
+        response = handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": CANCEL_TOOL_NAME,
+                    "arguments": {"job_id": "job-1"},
+                },
+            },
+            self.store,
+            "/repo",
+            job_manager=manager,
+        )
+        manager.cancel.assert_called_once_with("job-1")
+        self.assertFalse(response["result"]["isError"])
+
+
+class ClaudeJobManagerTests(unittest.TestCase):
+    def store(self, directory):
+        store = Mock()
+        store.home = Path(directory) / "state"
+        store.load.return_value = {"agentDefaults": {"claude": "main"}}
+        store.environment.return_value = {"PATH": "/bin"}
+        return store
+
+    def test_standard_job_completes_without_an_implicit_dollar_budget(self):
+        captured = {}
+
+        def consult(store, cwd, prompt, **options):
+            captured.update(options)
+            options["progress_callback"](
+                {"type": "result", "num_turns": 2, "total_cost_usd": 0.04}
+            )
+            return "Reviewed"
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(
+                self.store(directory), "/repo", consult=consult, detach_seconds=1
+            )
+            result = manager.start("Review", {})
+            manager.shutdown()
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(result["result"], "Reviewed")
+        self.assertEqual(captured["timeout"], EXECUTION_PROFILES["standard"]["timeout_seconds"])
+        self.assertEqual(captured["max_turns"], EXECUTION_PROFILES["standard"]["max_turns"])
+        self.assertIsNone(captured["max_budget_usd"])
+
+    def test_explicit_limits_override_the_execution_profile(self):
+        captured = {}
+
+        def consult(store, cwd, prompt, **options):
+            captured.update(options)
+            return "Done"
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(
+                self.store(directory), "/repo", consult=consult, detach_seconds=1
+            )
+            result = manager.start(
+                "Inspect",
+                {
+                    "execution_profile": "deep",
+                    "timeout_seconds": 600,
+                    "max_turns": 12,
+                    "max_budget_usd": 1.25,
+                },
+            )
+            manager.shutdown()
+        self.assertEqual(result["state"], "completed")
+        self.assertEqual(captured["timeout"], 600)
+        self.assertEqual(captured["max_turns"], 12)
+        self.assertEqual(captured["max_budget_usd"], 1.25)
+
+    def test_background_job_can_be_monitored_and_cancelled_without_retry(self):
+        started = threading.Event()
+
+        def consult(store, cwd, prompt, cancel_event=None, **options):
+            started.set()
+            cancel_event.wait(2)
+            raise AdapterError("Claude consultation cancelled")
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(self.store(directory), "/repo", consult=consult)
+            initial = manager.start("Long review", {"background": True})
+            self.assertTrue(started.wait(1))
+            running = manager.status(initial["job_id"])
+            self.assertEqual(running["state"], "running")
+            manager.cancel(initial["job_id"])
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                final = manager.status(initial["job_id"])
+                if final["state"] == "cancelled":
+                    break
+                time.sleep(0.01)
+            manager.shutdown()
+        self.assertEqual(final["state"], "cancelled")
+
+    def test_slow_job_automatically_detaches_after_the_fast_wait(self):
+        release = threading.Event()
+
+        def consult(store, cwd, prompt, **options):
+            release.wait(1)
+            return "Finished"
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(
+                self.store(directory), "/repo", consult=consult, detach_seconds=0.01
+            )
+            initial = manager.start("Long review", {})
+            self.assertEqual(initial["state"], "running")
+            release.set()
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                final = manager.status(initial["job_id"])
+                if final["state"] == "completed":
+                    break
+                time.sleep(0.01)
+            manager.shutdown()
+        self.assertEqual(final["result"], "Finished")
+
+    def test_duplicate_background_job_is_rejected_for_the_same_profile(self):
+        started = threading.Event()
+
+        def consult(store, cwd, prompt, cancel_event=None, **options):
+            started.set()
+            cancel_event.wait(2)
+            raise AdapterError("Claude consultation cancelled")
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(self.store(directory), "/repo", consult=consult)
+            manager.start("First", {"background": True})
+            self.assertTrue(started.wait(1))
+            with self.assertRaisesRegex(AdapterError, "already active"):
+                manager.start("Second", {"background": True})
+            manager.shutdown()
+
+    def test_new_job_uses_new_main_profile_after_active_job_finishes(self):
+        store = self.store(tempfile.gettempdir())
+        profiles = []
+
+        def consult(store, cwd, prompt, **options):
+            profiles.append(options["profile"])
+            return "Done"
+
+        manager = ClaudeJobManager(store, "/repo", consult=consult, detach_seconds=1)
+        first = manager.start("First", {})
+        self.assertEqual(first["state"], "completed")
+        store.load.return_value = {"agentDefaults": {"claude": "reviewer"}}
+        second = manager.start("Second", {})
+        manager.shutdown()
+        self.assertEqual(second["state"], "completed")
+        self.assertEqual(profiles, ["main", "reviewer"])
+
+    def test_expired_completed_job_is_removed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(
+                self.store(directory),
+                "/repo",
+                consult=Mock(return_value="Done"),
+                detach_seconds=1,
+            )
+            completed = manager.start("Review", {})
+            job = manager._jobs[completed["job_id"]]
+            job.completed_at -= 16 * 60
+            with self.assertRaisesRegex(AdapterError, "Unknown or expired"):
+                manager.status(completed["job_id"])
+            manager.shutdown()
+
+    def test_stream_output_reports_activity_and_final_result(self):
+        script = (
+            "import json,sys; sys.stdin.buffer.read(); "
+            "print(json.dumps({'type':'assistant'})); "
+            "print(json.dumps({'type':'result','result':'OK','num_turns':1,"
+            "'total_cost_usd':0.02}))"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        events = []
+        output, stderr = _stream_claude_output(
+            process,
+            "hello",
+            time.monotonic() + 5,
+            progress_callback=events.append,
+        )
+        self.assertEqual(output, "OK")
+        self.assertEqual(stderr, "")
+        self.assertEqual([event["type"] for event in events], ["assistant", "result"])
+
     def test_completed_workers_are_released_while_server_remains_active(self):
         output = io.StringIO()
         references = []
@@ -336,8 +562,7 @@ class ClaudeConsultTests(unittest.TestCase):
         self.assertIn("Read,Glob,Grep", command)
         self.assertIn("--effort", command)
         self.assertIn("low", command)
-        self.assertIn("--max-budget-usd", command)
-        self.assertIn(f"{DEFAULT_MAX_BUDGET_USD:g}", command)
+        self.assertNotIn("--max-budget-usd", command)
         self.assertEqual(command[command.index("--output-format") + 1], "text")
         self.assertNotIn("--no-session-persistence", command)
         self.assertNotIn("--resume", command)
@@ -369,6 +594,24 @@ class ClaudeConsultTests(unittest.TestCase):
             output = run_claude_consult(self_store, "/repo", "Inspect")
         self.assertEqual(len(output), MAX_OUTPUT_CHARS)
         self.assertIn("output truncated", output)
+
+    @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
+    @patch("super_agent.mcp_server.subprocess.Popen")
+    def test_explicit_turn_and_budget_limits_are_forwarded(
+        self, popen, executable
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            popen.return_value = self.process()
+            run_claude_consult(
+                self.store(directory),
+                "/repo",
+                "Inspect",
+                max_turns=7,
+                max_budget_usd=1.25,
+            )
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--max-turns") + 1], "7")
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "1.25")
 
     @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
     @patch("super_agent.mcp_server.subprocess.Popen")

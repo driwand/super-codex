@@ -16,7 +16,11 @@ CLAUDE_ROUTING_INSTRUCTIONS = (
     "super_codex_claude.ask_claude MCP tool immediately and exactly once. Put the "
     "user's request directly in the tool's request field. For current changes, diffs, "
     "staged, or uncommitted work, set "
-    "include_diff=true. Follow-up calls continue Claude's context for this Codex session. "
+    "include_diff=true. Fast responses return directly; otherwise monitor the returned "
+    "job with super_codex_claude.claude_job_status and never start a replacement. Use "
+    "execution_profile=quick or deep only when the user explicitly requests that depth; "
+    "otherwise use standard. Set max_budget_usd only when the user explicitly specifies "
+    "a dollar budget. Follow-up calls continue Claude's context for this Codex session. "
     "Set new_context=true only when the user explicitly requests a fresh Claude context. "
     "Do not inspect files or Git first. Never invoke claude, sc ask "
     "--agent claude, super-codex mcp-server, or MCP JSON through the shell. If the MCP "
@@ -236,11 +240,24 @@ def codex_claude_mcp_arguments(command):
         "-c",
         "mcp_servers.super_codex_claude.required=true",
         "-c",
-        'mcp_servers.super_codex_claude.enabled_tools=["ask_claude"]',
+        (
+            'mcp_servers.super_codex_claude.enabled_tools='
+            '["ask_claude","claude_job_status","cancel_claude_job"]'
+        ),
         "-c",
         "mcp_servers.super_codex_claude.tool_timeout_sec=180",
         "-c",
         'mcp_servers.super_codex_claude.tools.ask_claude.approval_mode="auto"',
+        "-c",
+        (
+            'mcp_servers.super_codex_claude.tools.'
+            'claude_job_status.approval_mode="auto"'
+        ),
+        "-c",
+        (
+            'mcp_servers.super_codex_claude.tools.'
+            'cancel_claude_job.approval_mode="auto"'
+        ),
         "-c",
         f"developer_instructions={json.dumps(CLAUDE_ROUTING_INSTRUCTIONS)}",
     ]

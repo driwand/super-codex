@@ -26,6 +26,7 @@ class CliTests(unittest.TestCase):
             {
                 "SUPER_AGENT_HOME": str(self.state),
                 "CODEX_HOME": str(self.codex_home),
+                "SUPER_CODEX_SHARED_CODEX_HOME": str(self.codex_home),
             },
             clear=False,
         )
@@ -257,6 +258,24 @@ class CliTests(unittest.TestCase):
         config = json.loads((self.state / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(config["profiles"]["codex"]["2"]["label"], "Work")
 
+    def test_profile_main_command_designates_the_default_account(self):
+        self.add_account_2()
+        code, output = self.output(["profile", "main", "codex", "2"])
+        self.assertEqual(code, 0)
+        self.assertEqual(output, "Main Codex account: codex/2\n")
+        config = json.loads((self.state / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["defaults"], {"agent": "codex", "profile": "2"})
+        self.assertEqual(config["agentDefaults"]["codex"], "2")
+        code, output = self.output(["profiles", "--json"])
+        self.assertEqual(code, 0)
+        rows = json.loads(output)
+        self.assertFalse(next(row for row in rows if row["profile"] == "main")["main"])
+        self.assertTrue(next(row for row in rows if row["profile"] == "2")["main"])
+
+    def test_profile_main_rejects_an_unknown_account(self):
+        code, _ = self.output(["profile", "main", "codex", "2"])
+        self.assertEqual(code, 2)
+
     @patch("super_agent.cli.executable", return_value="/bin/agent")
     @patch("super_agent.cli.profile_rows")
     def test_setup_gives_numbered_account_next_step(self, profile_rows, executable):
@@ -298,6 +317,28 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("codex -C", output)
         self.assertNotIn("profiles/codex/", output)
+
+    def test_main_shorthand_launches_the_designated_account(self):
+        self.add_account_2()
+        self.output(["profile", "main", "codex", "2"])
+        code, output = self.output(["main", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("profiles/codex/2", output)
+
+    def test_one_shorthand_still_launches_the_shared_account(self):
+        self.add_account_2()
+        self.output(["profile", "main", "codex", "2"])
+        code, output = self.output(["1", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("profiles/codex/", output)
+
+    def test_main_shorthand_honors_an_explicit_agent(self):
+        self.add_account_2()
+        self.output(["profile", "main", "codex", "2"])
+        code, output = self.output(["main", "--agent", "claude", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("claude", output)
+        self.assertNotIn("CODEX_HOME=", output)
 
     def test_profile_order_command_persists_picker_order(self):
         self.add_account_2()
@@ -366,6 +407,7 @@ class CliTests(unittest.TestCase):
             [{
                 "profile": "2",
                 "label": "Personal",
+                "main": True,
                 "authenticated": True,
                 "authDetail": "logged in",
                 "live": ["account: me@example.com (plus)", "5h: 25% used"],
@@ -373,6 +415,7 @@ class CliTests(unittest.TestCase):
             0,
         )
         rendered = "\n".join(lines)
+        self.assertIn("Personal (main)", rendered)
         self.assertIn("me@example.com", rendered)
         self.assertIn("5h: 25% used", rendered)
 

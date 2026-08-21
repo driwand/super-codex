@@ -13,9 +13,11 @@ Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Co
 - Keeps an existing Codex login as `codex/main`.
 - Supports as many as five Codex accounts named `main`, `2`, `3`, `4`, and `5`.
 - Shows an arrow-key account picker with each account's identity and current limits when you run bare `sc`.
+- Lets you designate any configured Codex profile as the main account.
 - Lets you reorder accounts and globally switch bare `sc` between the picker and `main`.
 - Shares Codex session and archived-session history across isolated Codex profiles.
 - Gives every `sc`-launched Codex session a read-only `ask_claude` MCP tool.
+- Keeps longer Claude consultations running as monitored, cancellable background jobs.
 - Keeps direct Claude launch available as an explicit fallback.
 - Binds a project directory to a profile without modifying that project.
 - Reads Codex account identity and limits through Codex's app-server protocol.
@@ -123,12 +125,15 @@ The label is optional; without one, this profile is labeled `Codex 2`. The comma
 
 Running the same command for an existing isolated profile starts a replacement login in a fresh provider home. Super Codex warns before login and atomically selects that home, including any new label, only after the provider reports verified authentication. Cancelling, failing, or exiting without authentication removes the unused candidate and leaves the existing provider home untouched. After a successful replacement, the previous provider home is retained so an already-running session is not disrupted, but future launches use the replacement. Credentials remain managed exclusively by the provider's native login flow; Super Codex never reads or copies them.
 
-Give the profiles meaningful labels:
+Give the profiles meaningful labels and designate the account used by `sc main`:
 
 ```bash
 sc profile label codex main "Work"
 sc profile label codex 2 "Personal"
+sc profile main codex 2
 ```
+
+The picker marks the designated account as `(main)` and preselects it when no workspace binding applies. This changes profile routing only: it never moves or swaps provider files. The storage profile named `codex/main` remains the original shared Codex home, and `sc 1` continues to launch it directly.
 
 Confirm the identities and limits:
 
@@ -142,10 +147,11 @@ Run bare `sc` to fetch each configured account's username and current limits, th
 sc
 ```
 
-Press `1`–`5` in the picker for a quick selection. You can also bypass the picker directly:
+Press `1`–`5` in the picker for a quick selection. You can also bypass the picker directly: `sc main` launches the designated main Codex account, while `sc 1` through `sc 5` launch fixed storage profiles.
 
 ```bash
 sc main
+sc 1
 sc 2
 ```
 
@@ -281,11 +287,14 @@ sc profile add codex 2 --label "Personal"
 sc profile add codex 3
 ```
 
-The five supported Codex identifiers are exactly `main`, `2`, `3`, `4`, and `5` (`1` is accepted as a command-line alias for `main`). Reorder every configured profile in the picker by listing each one exactly once:
+The five storage identifiers are exactly `main`, `2`, `3`, `4`, and `5` (`1` is accepted as a command-line alias for the shared `main` storage profile). Designate any configured account as the logical main account, or reorder every configured profile in the picker by listing each one exactly once:
 
 ```bash
+sc profile main codex 2
 sc profile order codex main 3 2
 ```
+
+Changing the logical main account also changes the global Codex default when Codex is the active global agent. Existing workspace bindings remain explicit and are not rewritten.
 
 Codex officially supports relocating state with `CODEX_HOME`. Super Codex preserves
 an exported shared home across direct and nested launches, keeps isolated provider
@@ -308,6 +317,13 @@ Every Codex command launched through `sc` receives an ephemeral MCP configuratio
 
 The consultation runs `claude -p` with the prompt over standard input. Only Claude's read-only `Read`, `Glob`, and `Grep` tools are enabled. No permission-bypass flags are added, and Claude's output is treated as untrusted advisory text rather than an instruction to edit automatically.
 
+Each request is a managed in-memory job. Super Codex waits up to 10 seconds for a fast
+answer; slower work returns a job ID and continues without holding the original MCP call
+open. Codex monitors the same job with `claude_job_status`, which reads only local state
+and consumes no additional Claude usage, and can stop it with `cancel_claude_job`.
+Completed job results remain available for 15 minutes, with at most 20 completed jobs
+retained. Jobs never survive the live Codex session.
+
 Super Codex assigns the first consultation a native Claude Code session ID. Later `ask_claude`
 calls in the same live Codex session resume that ID, so follow-up questions retain
 Claude's prior prompts, tool results, and answers. The ID is held only in the MCP
@@ -327,28 +343,43 @@ Super Codex never reads or copies those transcripts and does not delete them whe
 context is replaced or the MCP server exits. Use Claude Code's own retention settings to
 manage that provider-owned history.
 
-Super Codex allows only one active consultation for the same workspace and Claude profile. The lock is owned by the operating system and is released when the process exits, so a retry cannot start a second Claude process while the first remains live. MCP cancellation, client disconnect, timeout, `SIGINT`, and `SIGTERM` all cancel the consultation and terminate its complete Claude process group.
+Super Codex allows only one active consultation for the same workspace and Claude profile. The lock is owned by the operating system and is released when the process exits, so a retry cannot start a second Claude process while the first remains live. MCP cancellation, explicit job cancellation, client disconnect, timeout, `SIGINT`, and `SIGTERM` all cancel the consultation and terminate its complete Claude process group. Changing the designated main Claude profile affects new jobs; an active job stays with the profile under which it started.
 
 For requests mentioning current changes, a diff, staged work, or uncommitted work,
 Super Codex obtains Git status plus staged and unstaged diffs itself using argument-array,
 read-only Git commands. External diff and text-conversion drivers are disabled. The
 context is sent directly to Claude, so Codex does not need to inspect or relay the diff.
 
-Default resource controls are deliberately conservative:
+Three execution profiles provide predictable time and turn limits. `standard` is the
+default; Codex selects `quick` or `deep` only when the user explicitly requests it.
+Explicit per-request overrides may select any timeout from 10 seconds through 30 minutes
+and any turn limit from 1 through 50.
+
+| Profile | Wall-clock timeout | Agent turns |
+| --- | --- | --- |
+| `quick` | 1 minute | 3 |
+| `standard` | 5 minutes | 10 |
+| `deep` | 30 minutes | 30 |
+
+Other resource controls remain deliberately bounded:
 
 | Control | Default | Override |
 | --- | --- | --- |
-| Wall-clock timeout | 90 seconds | `SUPER_CODEX_CLAUDE_TIMEOUT_SECONDS` (10-165) |
 | Claude output per model response | 4,096 tokens | `SUPER_CODEX_CLAUDE_MAX_OUTPUT_TOKENS` (512-16,384) |
-| Claude agent-loop budget estimate | US$0.50 | `SUPER_CODEX_CLAUDE_MAX_BUDGET_USD` (0.01-10) |
+| Claude dollar budget | none | explicit `max_budget_usd` or `SUPER_CODEX_CLAUDE_MAX_BUDGET_USD` (0.01-10) |
 | Claude effort | `low` | `SUPER_CODEX_CLAUDE_EFFORT` (`low` through `max`) |
 | Parallel Claude read tools | 1 | Not configurable through Super Codex |
 | Git change context sent to Claude | 24,000 characters | Not configurable |
 | Text returned to Codex | 8,000 characters | Not configurable |
 
-The output-token setting follows Claude Code's documented `CLAUDE_CODE_MAX_OUTPUT_TOKENS` interface. The dollar budget uses Claude Code's client-side cost estimate; it is a stopping guard, not an exact prediction of subscription quota impact. The final 8,000-character truncation protects Codex context only and does not refund or prevent tokens Claude already generated.
+`SUPER_CODEX_CLAUDE_TIMEOUT_SECONDS` and `SUPER_CODEX_CLAUDE_MAX_TURNS` explicitly
+replace the selected profile's defaults. The output-token setting follows Claude Code's
+documented `CLAUDE_CODE_MAX_OUTPUT_TOKENS` interface. When explicitly supplied, the
+dollar budget uses Claude Code's client-side cost estimate; it is a stopping guard, not
+an exact prediction of subscription quota impact. The final 8,000-character truncation
+protects Codex context only and does not refund or prevent tokens Claude already generated.
 
-If a consultation appears slow, wait for the original MCP call or cancel it. Do not start a replacement while its status is uncertain; Super Codex will reject a duplicate for that workspace and profile.
+If a consultation appears slow, monitor the returned job or cancel it. Do not start a replacement while its status is uncertain; Super Codex will reject a duplicate for that workspace and profile.
 
 Resuming Claude preserves useful context but increases the amount of prior conversation
 Claude may need to process. Start a fresh context for unrelated work instead of allowing
@@ -367,9 +398,10 @@ Use the CLI to inspect the schema-versioned registry and change bare-command beh
 ```bash
 sc config path
 sc config show
-sc config mode        # print select or main
-sc config mode main   # bare sc launches the selected binding directly
-sc config mode select # Codex bindings open the live picker
+sc profile main codex 2 # designate codex/2 as the main Codex account
+sc config mode          # print select or main
+sc config mode main     # bare sc launches the selected binding directly
+sc config mode select   # Codex bindings open the live picker
 ```
 
 The current config schema is version 2. This profile model is a clean break: schema-v1 registries and the former `second` profile name are not migrated. Super Codex always uses `~/.config/super-codex`; an old `~/.config/super-agent-control` directory is ignored and left untouched. Provider credential files are never read or copied by Super Codex.
