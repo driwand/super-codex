@@ -485,9 +485,11 @@ class CliTests(unittest.TestCase):
     def test_unusable_profile_does_not_abort_listing_or_doctor(self):
         self.add_account_2()
         sessions = self.state / "profiles" / "codex" / "2" / "sessions"
-        sessions.unlink()
-        sessions.mkdir()
-        (sessions / "existing.jsonl").write_text("local", encoding="utf-8")
+        if sessions.is_symlink() or sessions.is_file():
+            sessions.unlink()
+        else:
+            sessions.rmdir()
+        sessions.write_text("not a directory", encoding="utf-8")
 
         code, output = self.output(["profiles"])
         self.assertEqual(code, 0)

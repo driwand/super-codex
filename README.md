@@ -5,7 +5,7 @@ A local, Codex-first control plane for using multiple Codex accounts and consult
 > **Disclaimer:** This project is **FULLY vibe coded**. Review the source and test
 > it in your own environment before relying on it.
 
-Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Codex remains the main interface. Account credentials stay isolated, local Codex session history is shared across those accounts, and Claude is exposed to Codex as a read-only consultation tool.
+Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Codex remains the main interface. Account credentials and local Codex session history stay isolated per account, and Claude is exposed to Codex as a read-only consultation tool.
 
 ## What it does
 
@@ -15,7 +15,7 @@ Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Co
 - Shows an arrow-key account picker with each account's identity and current limits when you run bare `sc`.
 - Lets you designate any configured Codex profile as the main account.
 - Lets you reorder accounts and globally switch bare `sc` between the picker and `main`.
-- Shares Codex session and archived-session history across isolated Codex profiles.
+- Keeps Codex session and archived-session history separate per Codex profile.
 - Gives every `sc`-launched Codex session a read-only `ask_claude` MCP tool.
 - Keeps longer Claude consultations running as monitored, cancellable background jobs.
 - Keeps direct Claude launch available as an explicit fallback.
@@ -276,8 +276,8 @@ Super Codex never adds permission-bypass flags. Arguments after `--native` are p
 
 | Profile | Default storage behavior |
 | --- | --- |
-| `codex/main` | Inherits the normal Codex environment and existing login; owns the shared session directories |
-| `codex/2` through `codex/5` | Use private `CODEX_HOME` directories for authentication and configuration, with session directories linked to `codex/main` |
+| `codex/main` | Inherits the normal Codex environment and existing login; owns `~/.codex` and its session directories |
+| `codex/2` through `codex/5` | Use private `CODEX_HOME` directories for authentication, configuration, and session directories |
 | `claude/main` | Inherits the normal Claude Code environment and existing login |
 
 Numbered Codex profiles are isolated by default. Add only the accounts you need:
@@ -297,11 +297,12 @@ sc profile order codex main 3 2
 Changing the logical main account also changes the global Codex default when Codex is the active global agent. Existing workspace bindings remain explicit and are not rewritten.
 
 Codex officially supports relocating state with `CODEX_HOME`. Super Codex preserves
-an exported shared home across direct and nested launches, keeps isolated provider
-homes separate, and creates validated links for only `sessions` and
-`archived_sessions`. Credential files, configuration, logs, and account-specific
-databases are not linked. An existing non-empty isolated session directory is never
-replaced automatically.
+an exported shared home across direct and nested launches and keeps isolated provider
+homes separate, including their `sessions` and `archived_sessions` directories. Codex
+canonicalizes rollout paths and refuses any rollout that resolves outside `CODEX_HOME`,
+so linked session directories break thread forking. Session directories linked by
+releases before 0.6.0 are converted once into real directories that hard link the shared
+transcripts, so history already indexed by that profile stays available.
 
 Isolated Claude profiles use `CLAUDE_CONFIG_DIR`, which works in current Claude Code
 releases but is not documented as a stable public interface. Super Codex remembers
@@ -309,7 +310,7 @@ whether that variable was exported before entering an isolated profile so a nest
 shared-profile launch restores the original value or its absence; the default Claude
 profile therefore remains shared.
 
-Isolation covers provider configuration, credentials, logs, and account-specific databases stored in that provider home. Codex transcripts are intentionally shared so either account can resume them. It does not isolate operating-system state such as Git configuration, SSH keys, keychains, browser sessions, or files accessible to the launched agent.
+Isolation covers provider configuration, credentials, logs, account-specific databases, and Codex transcripts stored in that provider home. Each account records new sessions in its own home, so a session started under one account is resumed under that same account. It does not isolate operating-system state such as Git configuration, SSH keys, keychains, browser sessions, or files accessible to the launched agent.
 
 ## Claude inside Codex
 

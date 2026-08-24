@@ -70,26 +70,83 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(expected.is_dir())
         self.assertEqual(stat.S_IMODE(expected.stat().st_mode), 0o700)
 
-    def test_isolated_codex_profile_shares_only_session_directories(self):
+    def test_isolated_codex_profile_uses_real_session_directories(self):
         config = self.store.load()
         self.store.add_profile(config, "codex", "2", "Personal")
         env = self.store.environment("codex", "2", config)
         profile_home = Path(env["CODEX_HOME"])
         for name in ("sessions", "archived_sessions"):
-            linked = profile_home / name
-            self.assertTrue(linked.is_symlink())
-            self.assertEqual(linked.resolve(), (self.codex_home / name).resolve())
+            directory = profile_home / name
+            self.assertFalse(directory.is_symlink())
+            self.assertTrue(directory.is_dir())
         self.assertFalse((profile_home / "auth.json").exists())
 
-    def test_refuses_to_replace_existing_isolated_session_data(self):
+    def test_migrates_linked_session_directories_into_real_directories(self):
+        config = self.store.load()
+        self.store.add_profile(config, "codex", "2", "Personal")
+        profile_home = self.store.profile_home("codex", "2", config, create=True)
+        shared_rollout = self.codex_home / "sessions" / "2026" / "08"
+        shared_rollout.mkdir(parents=True)
+        transcript = shared_rollout / "rollout-2026-08-20T00-00-00-abc.jsonl"
+        transcript.write_text("shared", encoding="utf-8")
+        for name in ("sessions", "archived_sessions"):
+            (profile_home / name).symlink_to(
+                self.codex_home / name, target_is_directory=True
+            )
+
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.codex_home)}, clear=True):
+            self.store.environment("codex", "2", config)
+
+        migrated = profile_home / "sessions"
+        self.assertFalse(migrated.is_symlink())
+        self.assertTrue(migrated.is_dir())
+        linked = migrated / "2026" / "08" / transcript.name
+        self.assertEqual(linked.read_text(encoding="utf-8"), "shared")
+        self.assertEqual(linked.stat().st_ino, transcript.stat().st_ino)
+        self.assertFalse((profile_home / "archived_sessions").is_symlink())
+        self.assertEqual(list(profile_home.glob("sessions.*.migrating")), [])
+
+    def test_migration_keeps_transcripts_written_by_the_profile(self):
         config = self.store.load()
         self.store.add_profile(config, "codex", "2", "Personal")
         profile_home = self.store.profile_home("codex", "2", config, create=True)
         sessions = profile_home / "sessions"
         sessions.mkdir()
         (sessions / "existing-session.jsonl").write_text("local", encoding="utf-8")
-        with self.assertRaisesRegex(ConfigError, "already contains data"):
+
+        self.store.environment("codex", "2", config)
+
+        self.assertEqual(
+            (sessions / "existing-session.jsonl").read_text(encoding="utf-8"), "local"
+        )
+
+    def test_rejects_session_link_outside_the_shared_home(self):
+        config = self.store.load()
+        self.store.add_profile(config, "codex", "2", "Personal")
+        profile_home = self.store.profile_home("codex", "2", config, create=True)
+        elsewhere = Path(self.temporary.name) / "elsewhere"
+        elsewhere.mkdir()
+        (profile_home / "sessions").symlink_to(elsewhere, target_is_directory=True)
+        with self.assertRaisesRegex(ConfigError, "unexpected Codex session link"):
             self.store.environment("codex", "2", config)
+
+    def test_replacement_home_keeps_the_profile_transcripts(self):
+        config = self.store.load()
+        self.store.add_profile(config, "codex", "2", "Personal")
+        profile_home = self.store.profile_home("codex", "2", config, create=True)
+        sessions = profile_home / "sessions"
+        sessions.mkdir()
+        transcript = sessions / "rollout-2026-08-20T00-00-00-abc.jsonl"
+        transcript.write_text("profile", encoding="utf-8")
+
+        provider_home, env = self.store.replacement_environment("codex", "2", config)
+        candidate = Path(env["CODEX_HOME"])
+
+        self.assertEqual(candidate.name, provider_home)
+        carried = candidate / "sessions" / transcript.name
+        self.assertEqual(carried.read_text(encoding="utf-8"), "profile")
+        self.assertEqual(carried.stat().st_ino, transcript.stat().st_ino)
+        self.assertFalse((candidate / "sessions").is_symlink())
 
     def test_shared_profiles_preserve_exported_provider_homes(self):
         config = self.store.load()

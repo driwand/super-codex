@@ -369,7 +369,7 @@ def run_setup(store, config, cwd):
     for index, step in enumerate(steps, 1):
         print(f"{index}. {step}")
     print("\nIntegrated workflow:")
-    print("- Codex session history is shared across isolated Codex account profiles.")
+    print("- Each Codex account profile keeps its own session history.")
     print("- Codex can consult Claude through a read-only MCP tool in every `sc` session.")
     print("  Inside Codex, ask: 'Ask Claude to review this change.'")
     print("\nUse `sc status --live` whenever you need verified Codex limits.")

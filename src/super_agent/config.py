@@ -291,7 +291,10 @@ class Store:
         env = os.environ.copy()
         if agent == "codex":
             shared_home = self.shared_codex_home(env)
-            self._share_codex_sessions(candidate, shared_home)
+            self._prepare_codex_sessions(candidate, shared_home)
+            self._seed_replacement_sessions(
+                agent, profile, data, candidate, shared_home
+            )
             env[SHARED_CODEX_HOME_ENV] = str(shared_home)
         else:
             self._remember_shared_claude_home(env)
@@ -367,45 +370,120 @@ class Store:
         if SHARED_CLAUDE_HOME_ENV not in env:
             env[SHARED_CLAUDE_HOME_ENV] = env.get(HOME_ENV["claude"], "")
 
-    def _share_codex_sessions(self, isolated_home, shared_home):
+    def _prepare_codex_sessions(self, isolated_home, shared_home):
+        """Give an isolated Codex home real session directories.
+
+        Codex canonicalizes rollout paths and rejects any rollout that resolves
+        outside `CODEX_HOME`, so linking `sessions` into the shared home breaks
+        thread forking. Links written by earlier releases are converted once into
+        real directories that hard link the shared transcripts, which keeps the
+        history this provider home already indexed.
+        """
         isolated_home = absolute_path(isolated_home)
         shared_home = absolute_path(shared_home)
-        if isolated_home == shared_home:
-            return
+        migrated = []
         for name in CODEX_SESSION_DIRECTORIES:
-            source = shared_home / name
-            try:
-                source_status = source.lstat()
-            except FileNotFoundError:
-                continue
-            if stat.S_ISLNK(source_status.st_mode) or not stat.S_ISDIR(source_status.st_mode):
-                raise ConfigError(f"Refusing unsafe shared Codex session path: {source}")
-            if source_status.st_uid != os.getuid():
-                raise ConfigError(f"Shared Codex session path is not owned by this user: {source}")
-
             destination = isolated_home / name
             try:
                 destination_status = destination.lstat()
             except FileNotFoundError:
-                destination_status = None
-            if destination_status and stat.S_ISLNK(destination_status.st_mode):
-                target = Path(os.readlink(destination))
-                if not target.is_absolute():
-                    target = destination.parent / target
-                if absolute_path(target) == source:
-                    continue
-                raise ConfigError(f"Refusing unexpected Codex session link: {destination}")
-            if destination_status:
-                if stat.S_ISDIR(destination_status.st_mode) and not any(destination.iterdir()):
-                    os.rmdir(destination)
-                else:
-                    raise ConfigError(
-                        f"Cannot share Codex sessions because {destination} already contains data"
-                    )
-            try:
-                os.symlink(source, destination, target_is_directory=True)
+                ensure_private_directory(destination, parents=False)
+                continue
             except OSError as exc:
-                raise ConfigError(f"Cannot share Codex sessions at {destination}: {exc}") from exc
+                raise ConfigError(
+                    f"Cannot inspect Codex session path {destination}: {exc}"
+                ) from exc
+            if stat.S_ISLNK(destination_status.st_mode):
+                if isolated_home == shared_home:
+                    raise ConfigError(
+                        f"Refusing unexpected Codex session link: {destination}"
+                    )
+                self._replace_shared_session_link(destination, shared_home / name)
+                migrated.append(name)
+            elif not stat.S_ISDIR(destination_status.st_mode):
+                raise ConfigError(
+                    f"Refusing non-directory Codex session path: {destination}"
+                )
+        return migrated
+
+    def _replace_shared_session_link(self, destination, source):
+        target = Path(os.readlink(destination))
+        if not target.is_absolute():
+            target = destination.parent / target
+        if absolute_path(target) != source:
+            raise ConfigError(f"Refusing unexpected Codex session link: {destination}")
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f"{destination.name}.",
+                suffix=".migrating",
+                dir=str(destination.parent),
+            )
+        )
+        try:
+            ensure_private_directory(staging, parents=False)
+            self._link_session_tree(source, staging)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        try:
+            os.unlink(destination)
+            os.rename(staging, destination)
+        except OSError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise ConfigError(
+                f"Cannot replace Codex session link {destination}: {exc}"
+            ) from exc
+
+    def _link_session_tree(self, source, destination):
+        """Hard link every transcript under `source` into `destination`."""
+        source = absolute_path(source)
+        try:
+            source_status = source.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ConfigError(f"Cannot inspect Codex session path {source}: {exc}") from exc
+        if stat.S_ISLNK(source_status.st_mode) or not stat.S_ISDIR(source_status.st_mode):
+            raise ConfigError(f"Refusing unsafe Codex session path: {source}")
+        if source_status.st_uid != os.getuid():
+            raise ConfigError(f"Codex session path is not owned by this user: {source}")
+        ensure_private_directory(destination, parents=False)
+        try:
+            with os.scandir(source) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
+        except OSError as exc:
+            raise ConfigError(f"Cannot read Codex session path {source}: {exc}") from exc
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            child = destination / entry.name
+            if entry.is_dir():
+                self._link_session_tree(source / entry.name, child)
+            elif entry.is_file():
+                try:
+                    os.link(entry.path, child)
+                except FileExistsError:
+                    continue
+                except OSError:
+                    try:
+                        shutil.copy2(entry.path, child)
+                    except OSError as exc:
+                        raise ConfigError(
+                            f"Cannot migrate Codex transcript {entry.path}: {exc}"
+                        ) from exc
+
+    def _seed_replacement_sessions(self, agent, profile, data, candidate, shared_home):
+        """Carry an isolated profile's own transcripts into its replacement home."""
+        previous = self._provider_home(agent, data.get("providerHome", profile))
+        try:
+            previous_status = previous.lstat()
+        except OSError:
+            return
+        if stat.S_ISLNK(previous_status.st_mode) or not stat.S_ISDIR(previous_status.st_mode):
+            return
+        self._prepare_codex_sessions(previous, shared_home)
+        for name in CODEX_SESSION_DIRECTORIES:
+            self._link_session_tree(previous / name, candidate / name)
 
     def environment(self, agent, profile, config=None):
         config = config or self.load()
@@ -414,7 +492,7 @@ class Store:
         if home:
             if agent == "codex":
                 shared_home = self.shared_codex_home(env)
-                self._share_codex_sessions(home, shared_home)
+                self._prepare_codex_sessions(home, shared_home)
                 env[SHARED_CODEX_HOME_ENV] = str(shared_home)
             else:
                 self._remember_shared_claude_home(env)

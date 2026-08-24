@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated Codex profiles no longer link `sessions` and `archived_sessions` into the
+  shared Codex home. Codex canonicalizes rollout paths and rejects any rollout that
+  resolves outside `CODEX_HOME`, so the link made `/fork` fail with `rollout path ...
+  must be in Codex home directory`. Existing links are converted once into real
+  directories that hard link the shared transcripts, so previously indexed history stays
+  available and forking works.
+
+### Changed
+
+- Codex transcripts are no longer shared across accounts. Each isolated Codex profile now
+  records new sessions in its own provider home; a safe replacement home carries that
+  profile's own transcripts forward.
+
 ## [0.5.0] - 2026-08-21
 
 ### Added
