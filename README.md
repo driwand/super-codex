@@ -16,6 +16,7 @@ Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Co
 - Lets you designate any configured Codex profile as the main account.
 - Lets you reorder accounts and globally switch bare `sc` between the picker and `main`.
 - Keeps Codex session and archived-session history separate per Codex profile.
+- Routes any account through an OpenAI-compatible model provider without changing where its sessions are stored.
 - Gives every `sc`-launched Codex session a read-only `ask_claude` MCP tool.
 - Keeps longer Claude consultations running as monitored, cancellable background jobs.
 - Keeps direct Claude launch available as an explicit fallback.
@@ -386,6 +387,57 @@ Resuming Claude preserves useful context but increases the amount of prior conve
 Claude may need to process. Start a fresh context for unrelated work instead of allowing
 one review thread to grow indefinitely.
 
+## Model providers
+
+An account normally talks to its own vendor with its own login. A **provider** points
+that same account at an OpenAI-compatible endpoint instead — a gateway, a self-hosted
+model, or any other service that speaks the Responses or Chat Completions API.
+
+```bash
+sc provider add explabs \
+  --base-url https://api.experientiallabs.ai/v1 \
+  --env-key EXPLABS_API_KEY \
+  --model gpt-5.6-terra \
+  --label "Experiential Labs"
+
+sc provider list                  # show providers and whether each credential is exported
+sc --provider explabs             # one launch through the provider
+sc provider use explabs           # route this workspace through it
+sc provider use explabs --global  # route every workspace through it
+sc provider use default           # back to the account's own authentication
+sc unuse                          # release this workspace's account and provider bindings
+sc provider show explabs          # print the Codex profile this generates
+sc provider remove explabs
+```
+
+`default` is a reserved provider name meaning the account's own authentication. It is
+always available and is what a fresh configuration uses.
+
+A provider binding is independent of an account binding: `sc provider use` records the
+provider for the workspace without pinning which account that workspace launches.
+
+**Sessions are unaffected by the provider.** The provider is applied as a Codex profile
+flag, never as a change of `CODEX_HOME`, so an account's transcripts stay in that
+account's home no matter which provider produced them. Switching providers mid-project
+leaves `codex resume` showing one continuous history.
+
+Super Codex writes the provider's Codex profile into whichever account home a launch
+uses, regenerating it each time, so a provider added once works from every account.
+The generated file names the credential's environment variable; the secret itself is
+never read, copied, or stored by Super Codex. Export it in the shell that launches the
+agent:
+
+```bash
+export EXPLABS_API_KEY="..."
+```
+
+The `export` is required. A bare `KEY=value` line in a shell file is invisible to child
+processes, and the agent will report a missing environment variable while `echo $KEY`
+still looks correct in the same shell.
+
+Providers apply to Codex. Claude uses its own account authentication and rejects
+`--provider`.
+
 ## Configuration
 
 The source of truth is:
@@ -413,7 +465,7 @@ Override the state root for testing or portable setups:
 SUPER_AGENT_HOME=/path/to/state sc status
 ```
 
-The registry contains profile metadata and workspace bindings only. It contains no provider tokens or API keys. Isolated provider credentials are written by the provider's own native login command into that profile's private home.
+The registry contains profile metadata, workspace bindings, and model provider definitions only. It contains no provider tokens or API keys: a provider definition stores the NAME of the environment variable holding its credential, never the credential. Isolated provider credentials are written by the provider's own native login command into that profile's private home.
 
 ## Usage reporting
 

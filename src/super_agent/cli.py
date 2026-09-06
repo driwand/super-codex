@@ -22,7 +22,16 @@ from .adapters import (
     run_command,
     version,
 )
-from .config import AGENTS, CODEX_PROFILE_NAMES, ConfigError, Store
+from .config import (
+    AGENTS,
+    CODEX_PROFILE_NAMES,
+    DEFAULT_PROVIDER,
+    PROVIDER_REASONING,
+    PROVIDER_WIRE_APIS,
+    ConfigError,
+    Store,
+    render_codex_provider_profile,
+)
 from .mcp_server import serve as serve_mcp
 from .provenance import print_installation_provenance
 from .release import ReleaseError, run_uninstall, run_update
@@ -62,6 +71,7 @@ def parser():
     resume.add_argument(
         "--reasoning", choices=("minimal", "low", "medium", "high", "xhigh")
     )
+    resume.add_argument("--provider")
     resume.add_argument("--dry-run", action="store_true")
     resume.add_argument("--native", nargs=argparse.REMAINDER, default=[])
 
@@ -106,6 +116,32 @@ def parser():
     order.add_argument("agent", choices=AGENTS)
     order.add_argument("names", nargs="+")
 
+    provider = commands.add_parser("provider", help="Manage model providers")
+    provider_commands = provider.add_subparsers(dest="provider_command", required=True)
+    provider_list = provider_commands.add_parser("list", help="List configured providers")
+    provider_list.add_argument("--json", action="store_true")
+    provider_add = provider_commands.add_parser(
+        "add", help="Add or replace a model provider"
+    )
+    provider_add.add_argument("name")
+    provider_add.add_argument("--base-url", required=True, metavar="URL")
+    provider_add.add_argument("--env-key", required=True, metavar="VARIABLE")
+    provider_add.add_argument("--model", required=True, metavar="SLUG")
+    provider_add.add_argument("--label")
+    provider_add.add_argument("--wire-api", choices=PROVIDER_WIRE_APIS, default="responses")
+    provider_add.add_argument("--reasoning", choices=PROVIDER_REASONING)
+    provider_remove = provider_commands.add_parser("remove", help="Remove a model provider")
+    provider_remove.add_argument("name")
+    provider_use = provider_commands.add_parser(
+        "use", help="Route this workspace through a provider"
+    )
+    provider_use.add_argument("name")
+    provider_use.add_argument("--global", dest="globally", action="store_true")
+    provider_show = provider_commands.add_parser(
+        "show", help="Show the Codex profile a provider generates"
+    )
+    provider_show.add_argument("name")
+
     login = commands.add_parser("login", help="Run the provider's native login flow")
     add_selection_arguments(login)
     login.add_argument("--dry-run", action="store_true")
@@ -133,6 +169,10 @@ def add_launch_arguments(command, prompt_required):
     command.add_argument("--model")
     command.add_argument(
         "--reasoning", choices=("minimal", "low", "medium", "high", "xhigh")
+    )
+    command.add_argument(
+        "--provider",
+        help=f"Model provider to route through ('{DEFAULT_PROVIDER}' for the account's own)",
     )
     command.add_argument("--dry-run", action="store_true")
     command.add_argument("--native", nargs=argparse.REMAINDER, default=[])
@@ -376,6 +416,114 @@ def run_setup(store, config, cwd):
     return 0
 
 
+def provider_rows(store, config, cwd):
+    active, matched = store.provider_selection(config, cwd)
+    rows = [
+        {
+            "provider": DEFAULT_PROVIDER,
+            "label": "Account authentication (built in)",
+            "baseUrl": "",
+            "envKey": "",
+            "model": "",
+            "active": active == DEFAULT_PROVIDER,
+        }
+    ]
+    for name in sorted(config.get("providers", {})):
+        data = config["providers"][name]
+        rows.append(
+            {
+                "provider": name,
+                "label": data["label"],
+                "baseUrl": data["baseUrl"],
+                "envKey": data["envKey"],
+                "model": data["model"],
+                "active": active == name,
+            }
+        )
+    return rows, active, matched
+
+
+def run_provider(store, config, cwd, args):
+    if args.provider_command == "list":
+        rows, active, matched = provider_rows(store, config, cwd)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "active": active,
+                        "binding": matched,
+                        "providers": rows,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        for row in rows:
+            marker = "*" if row["active"] else " "
+            print(f"{marker} {row['provider']}  {row['label']}")
+            if row["baseUrl"]:
+                print(f"    {row['baseUrl']}  model {row['model']}")
+                state = "set" if os.environ.get(row["envKey"]) else "NOT SET"
+                print(f"    credential: ${row['envKey']} [{state}]")
+        if len(rows) == 1:
+            print(
+                "\nAdd one with: sc provider add <name> --base-url <url> "
+                "--env-key <VARIABLE> --model <slug>"
+            )
+        return 0
+    if args.provider_command == "add":
+        store.add_provider(
+            config,
+            args.name,
+            base_url=args.base_url,
+            env_key=args.env_key,
+            model=args.model,
+            label=args.label,
+            wire_api=args.wire_api,
+            reasoning=args.reasoning,
+        )
+        print(f"Added provider {args.name}.")
+        if not os.environ.get(args.env_key):
+            print(
+                f"Export its credential before launching: "
+                f'export {args.env_key}="..." (the `export` matters; a bare '
+                "assignment is invisible to the agent process)"
+            )
+        print(f"Use it with: sc --provider {args.name}")
+        return 0
+    if args.provider_command == "remove":
+        _, unbound = store.remove_provider(config, args.name)
+        print(f"Removed provider {args.name}.")
+        for workspace in unbound:
+            print(f"Workspace returned to {DEFAULT_PROVIDER}: {workspace}")
+        return 0
+    if args.provider_command == "use":
+        store.bind_provider(config, cwd, args.name, args.globally)
+        scope = "global default" if args.globally else cwd
+        if args.name == DEFAULT_PROVIDER:
+            print(f"Routing {scope} through account authentication")
+            return 0
+        print(f"Routing {scope} through provider {args.name}")
+        if args.name != DEFAULT_PROVIDER:
+            env_key = config["providers"][args.name]["envKey"]
+            if not os.environ.get(env_key):
+                print(f"Warning: ${env_key} is not exported in this shell.")
+        return 0
+    if args.provider_command == "show":
+        if args.name == DEFAULT_PROVIDER:
+            print(
+                f"{DEFAULT_PROVIDER} uses the account's own authentication and "
+                "generates no Codex profile."
+            )
+            return 0
+        data = store.require_provider(config, args.name)
+        print(f"# {store.codex_profile_name(args.name)} (written into the active CODEX_HOME)")
+        print(render_codex_provider_profile(args.name, data), end="")
+        return 0
+    raise ConfigError(f"Unsupported provider command: {args.provider_command}")
+
+
 def run_bindings(config, agent_filter=None, json_output=False):
     rows = [
         {"workspace": workspace, "agent": binding["agent"], "profile": binding["profile"]}
@@ -394,6 +542,7 @@ def run_bindings(config, agent_filter=None, json_output=False):
 
 def run_status(store, config, cwd, live=False, json_output=False):
     agent, profile, matched = store.selection(config, cwd)
+    provider, provider_matched = store.provider_selection(config, cwd)
     rows = profile_rows(store, config, live=live)
     if json_output:
         print(
@@ -402,8 +551,13 @@ def run_status(store, config, cwd, live=False, json_output=False):
                     "schemaVersion": 1,
                     "workspace": cwd,
                     "startupMode": config["startupMode"],
-                    "active": {"agent": agent, "profile": profile},
+                    "active": {
+                        "agent": agent,
+                        "profile": profile,
+                        "provider": provider,
+                    },
                     "binding": matched,
+                    "providerBinding": provider_matched,
                     "profiles": rows,
                 },
                 indent=2,
@@ -415,6 +569,12 @@ def run_status(store, config, cwd, live=False, json_output=False):
     print(f"Active:    {agent}/{profile}")
     print(f"Binding:   {matched or 'global default'}")
     print(f"Bare sc:   {config['startupMode']}")
+    provider_note = (
+        "account authentication"
+        if provider == DEFAULT_PROVIDER
+        else config["providers"][provider]["baseUrl"]
+    )
+    print(f"Provider:  {provider} ({provider_note})")
     print("Priority:  Codex primary; Claude available inside Codex as a read-only consultant")
     print()
     print_rows(rows, active=(agent, profile))
@@ -533,6 +693,17 @@ def main(argv=None):
             ):
                 agent, profile, _ = selected(store, config, args, cwd)
             env = store.environment(agent, profile, config)
+            provider, _ = store.provider_selection(
+                config, cwd, getattr(args, "provider", None)
+            )
+            if provider != DEFAULT_PROVIDER:
+                if agent != "codex":
+                    raise ConfigError(
+                        f"Providers apply to Codex only; {agent} uses its own "
+                        "account authentication"
+                    )
+                if not args.dry_run:
+                    store.materialize_codex_provider(env, config, provider)
             command = build_command(
                 agent,
                 args.command,
@@ -544,6 +715,7 @@ def main(argv=None):
                 reasoning=args.reasoning,
                 native=args.native,
                 mcp_command=launcher_command() if agent == "codex" else None,
+                provider=None if provider == DEFAULT_PROVIDER else provider,
             )
             return exec_command(command, env, cwd, args.dry_run, agent)
         if args.command == "status":
@@ -570,6 +742,8 @@ def main(argv=None):
             else:
                 print_rows(rows)
             return 0
+        if args.command == "provider":
+            return run_provider(store, config, cwd, args)
         if args.command == "profile" and args.profile_command == "add":
             name = store.normalize_profile(args.agent, args.name)
             existing = config["profiles"][args.agent].get(name)

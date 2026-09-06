@@ -274,6 +274,7 @@ def build_command(
     reasoning=None,
     native=None,
     mcp_command=None,
+    provider=None,
 ):
     native = list(native or [])
     if agent == "codex":
@@ -291,6 +292,8 @@ def build_command(
             command.extend(["-c", f"tui.status_line={json.dumps(CODEX_TUI_STATUS_LINE)}"])
         if mcp_command:
             command.extend(codex_claude_mcp_arguments(mcp_command))
+        if provider:
+            command.extend(["--profile", provider])
         if model:
             command.extend(["--model", model])
         if reasoning:

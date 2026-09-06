@@ -272,3 +272,24 @@ class StatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderCommandTests(unittest.TestCase):
+    def test_codex_start_passes_the_profile_flag(self):
+        command = build_command("codex", "start", "/tmp", provider="explabs")
+        self.assertIn("--profile", command)
+        self.assertEqual(command[command.index("--profile") + 1], "explabs")
+
+    def test_provider_flag_precedes_native_arguments(self):
+        command = build_command(
+            "codex", "start", "/tmp", provider="explabs", native=["--search"]
+        )
+        self.assertLess(command.index("--profile"), command.index("--search"))
+
+    def test_no_provider_leaves_the_command_untouched(self):
+        self.assertNotIn("--profile", build_command("codex", "start", "/tmp"))
+
+    def test_exec_keeps_the_provider_flag(self):
+        command = build_command("codex", "ask", "/tmp", prompt="hi", provider="explabs")
+        self.assertIn("--profile", command)
+        self.assertEqual(command[-1], "hi")

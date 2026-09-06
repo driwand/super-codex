@@ -10,12 +10,14 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from super_agent.config import (
+    DEFAULT_PROVIDER,
     ConfigError,
     SHARED_CLAUDE_HOME_ENV,
     SHARED_CODEX_HOME_ENV,
     Store,
     default_config,
     ensure_private_directory,
+    render_codex_provider_profile,
     resolve_home,
 )
 
@@ -383,3 +385,190 @@ class StoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.home = Path(self.temporary.name) / "state"
+        self.codex_home = Path(self.temporary.name) / "main-codex"
+        (self.codex_home / "sessions").mkdir(parents=True)
+        (self.codex_home / "archived_sessions").mkdir()
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "CODEX_HOME": str(self.codex_home),
+                SHARED_CODEX_HOME_ENV: str(self.codex_home),
+            },
+            clear=False,
+        )
+        self.environment.start()
+        self.store = Store(self.home)
+        self.config = self.store.load()
+        self.workspace = str(Path(self.temporary.name).resolve())
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def add(self, name="explabs", **overrides):
+        options = {
+            "base_url": "https://api.example.com/v1",
+            "env_key": "EXAMPLE_API_KEY",
+            "model": "example-model",
+            "label": "Example",
+        }
+        options.update(overrides)
+        return self.store.add_provider(self.config, name, **options)
+
+    def test_default_configuration_has_no_providers(self):
+        self.assertEqual(self.config["providers"], {})
+        self.assertEqual(self.config["providerDefaults"]["codex"], DEFAULT_PROVIDER)
+
+    def test_add_and_reload_provider(self):
+        self.add()
+        reloaded = Store(self.home).load()
+        self.assertEqual(reloaded["providers"]["explabs"]["baseUrl"], "https://api.example.com/v1")
+        self.assertEqual(reloaded["providers"]["explabs"]["wireApi"], "responses")
+
+    def test_reserved_default_name_is_rejected(self):
+        with self.assertRaises(ConfigError):
+            self.add(DEFAULT_PROVIDER)
+
+    def test_invalid_provider_fields_are_rejected(self):
+        with self.assertRaises(ConfigError):
+            self.add(base_url="ftp://example.com")
+        with self.assertRaises(ConfigError):
+            self.add(env_key="lowercase_key")
+        with self.assertRaises(ConfigError):
+            self.add(model="")
+        with self.assertRaises(ConfigError):
+            self.add(wire_api="grpc")
+
+    def test_selection_prefers_flag_then_binding_then_default(self):
+        self.add()
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], DEFAULT_PROVIDER
+        )
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], "explabs"
+        )
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace, DEFAULT_PROVIDER)[0],
+            DEFAULT_PROVIDER,
+        )
+
+    def test_binding_a_provider_does_not_pin_the_account(self):
+        self.add()
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        binding, _ = self.store.workspace_binding(self.config, self.workspace)
+        self.assertIsNone(binding)
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], "explabs"
+        )
+
+    def test_account_and_provider_bindings_are_independent(self):
+        self.add()
+        self.store.bind(self.config, self.workspace, "codex", "main")
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        self.store.bind(self.config, self.workspace, "codex", "main")
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], "explabs"
+        )
+        self.store.bind_provider(self.config, self.workspace, DEFAULT_PROVIDER)
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], DEFAULT_PROVIDER
+        )
+        self.assertEqual(
+            self.store.selection(self.config, self.workspace)[1], "main"
+        )
+
+    def test_provider_binding_is_inherited_by_subdirectories(self):
+        self.add()
+        child = Path(self.workspace) / "nested" / "deeper"
+        child.mkdir(parents=True)
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        self.assertEqual(
+            self.store.provider_selection(self.config, str(child))[0], "explabs"
+        )
+
+    def test_unbind_releases_the_provider_binding(self):
+        self.add()
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        self.assertTrue(self.store.unbind(self.config, self.workspace))
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], DEFAULT_PROVIDER
+        )
+
+    def test_unknown_provider_is_rejected(self):
+        with self.assertRaises(ConfigError):
+            self.store.provider_selection(self.config, self.workspace, "missing")
+
+    def test_removing_a_provider_releases_its_bindings(self):
+        self.add()
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        self.store.bind_provider(self.config, self.workspace, "explabs", globally=True)
+        _, unbound = self.store.remove_provider(self.config, "explabs")
+        self.assertEqual(len(unbound), 1)
+        self.assertEqual(self.config["providerDefaults"]["codex"], DEFAULT_PROVIDER)
+        self.assertEqual(
+            self.store.provider_selection(self.config, self.workspace)[0], DEFAULT_PROVIDER
+        )
+
+    def test_materialize_writes_a_private_profile_into_the_codex_home(self):
+        self.add(reasoning="medium")
+        env = self.store.environment("codex", "main", self.config)
+        path = self.store.materialize_codex_provider(env, self.config, "explabs")
+        self.assertEqual(path, self.codex_home / "explabs.config.toml")
+        content = path.read_text(encoding="utf-8")
+        self.assertIn('model_provider = "explabs"', content)
+        self.assertIn("[model_providers.explabs]", content)
+        self.assertIn('env_key = "EXAMPLE_API_KEY"', content)
+        self.assertIn('model_reasoning_effort = "medium"', content)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_materialize_never_writes_a_credential(self):
+        self.add()
+        with patch.dict(os.environ, {"EXAMPLE_API_KEY": "secret-value"}, clear=False):
+            env = self.store.environment("codex", "main", self.config)
+            path = self.store.materialize_codex_provider(env, self.config, "explabs")
+        self.assertNotIn("secret-value", path.read_text(encoding="utf-8"))
+
+    def test_materialize_targets_the_isolated_home_of_the_account(self):
+        self.add()
+        self.store.add_profile(self.config, "codex", "2", label="Second")
+        env = self.store.environment("codex", "2", self.config)
+        path = self.store.materialize_codex_provider(env, self.config, "explabs")
+        self.assertEqual(Path(env["CODEX_HOME"]), path.parent)
+        self.assertNotEqual(path.parent, self.codex_home)
+
+    def test_default_provider_materializes_nothing(self):
+        env = self.store.environment("codex", "main", self.config)
+        self.assertIsNone(
+            self.store.materialize_codex_provider(env, self.config, DEFAULT_PROVIDER)
+        )
+
+    def test_provider_does_not_change_the_session_home(self):
+        self.add()
+        without = self.store.environment("codex", "main", self.config)["CODEX_HOME"]
+        self.store.bind_provider(self.config, self.workspace, "explabs")
+        with_provider = self.store.environment("codex", "main", self.config)["CODEX_HOME"]
+        self.assertEqual(without, with_provider)
+
+    def test_configuration_written_before_providers_still_loads(self):
+        legacy = default_config()
+        del legacy["providers"]
+        del legacy["providerDefaults"]
+        self.store.config_path.write_text(json.dumps(legacy), encoding="utf-8")
+        os.chmod(self.store.config_path, 0o600)
+        migrated = Store(self.home).load()
+        self.assertEqual(migrated["providers"], {})
+        self.assertEqual(migrated["providerDefaults"]["codex"], DEFAULT_PROVIDER)
+
+    def test_rendered_profile_escapes_quotes(self):
+        rendered = render_codex_provider_profile(
+            "x", {"label": 'a "quoted" label', "model": "m", "baseUrl": "https://e/v1",
+                  "envKey": "K", "wireApi": "responses"}
+        )
+        self.assertIn('name = "a \\"quoted\\" label"', rendered)

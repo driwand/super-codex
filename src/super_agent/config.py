@@ -16,6 +16,11 @@ NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,47}$")
 PROVIDER_HOME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$")
 CODEX_PROFILE_NAMES = ("main", "2", "3", "4", "5")
 STARTUP_MODES = ("select", "main")
+DEFAULT_PROVIDER = "default"
+PROVIDER_WIRE_APIS = ("responses", "chat")
+PROVIDER_REASONING = ("minimal", "low", "medium", "high", "xhigh")
+PROVIDER_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+PROVIDER_URL_PATTERN = re.compile(r"^https?://[^\s]+$")
 
 
 class ConfigError(RuntimeError):
@@ -76,8 +81,43 @@ def default_config():
             },
         },
         "profileOrder": {"codex": ["main"], "claude": ["main"]},
+        "providers": {},
+        "providerDefaults": {"codex": DEFAULT_PROVIDER},
+        "providerBindings": {},
         "workspaces": {},
     }
+
+
+def _toml_string(value):
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def render_codex_provider_profile(name, provider):
+    """Render a Codex v2 profile file for one provider.
+
+    Only the NAME of the credential environment variable is written; the secret
+    itself is never read, copied, or stored by Super Codex.
+    """
+    lines = [
+        "# Managed by Super Codex. Regenerated on every launch; edits are lost.",
+        f"# Provider: {provider['label']}",
+        f"model = {_toml_string(provider['model'])}",
+        f"model_provider = {_toml_string(name)}",
+    ]
+    if provider.get("reasoning"):
+        lines.append(f"model_reasoning_effort = {_toml_string(provider['reasoning'])}")
+    lines.extend(
+        [
+            "",
+            f"[model_providers.{name}]",
+            f"name = {_toml_string(provider['label'])}",
+            f"base_url = {_toml_string(provider['baseUrl'])}",
+            f"env_key = {_toml_string(provider['envKey'])}",
+            f"wire_api = {_toml_string(provider['wireApi'])}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def resolve_home():
@@ -119,7 +159,10 @@ class Store:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+        migrated = self._migrate_providers(config)
         self.validate(config)
+        if migrated:
+            self.save(config)
         return config
 
     def save(self, config):
@@ -148,6 +191,31 @@ class Store:
             except OSError:
                 pass
             raise
+
+    @staticmethod
+    def _migrate_providers(config):
+        """Add the provider keys to a configuration written before providers existed.
+
+        Providers are additive to schema version 2: an older file is valid apart
+        from these two keys, so filling them in keeps the version stable instead
+        of forcing users to recreate their accounts.
+        """
+        if not isinstance(config, dict):
+            return False
+        changed = False
+        if not isinstance(config.get("providers"), dict):
+            config["providers"] = {}
+            changed = True
+        defaults = config.get("providerDefaults")
+        if not isinstance(defaults, dict) or not isinstance(
+            defaults.get("codex"), str
+        ):
+            config["providerDefaults"] = {"codex": DEFAULT_PROVIDER}
+            changed = True
+        if not isinstance(config.get("providerBindings"), dict):
+            config["providerBindings"] = {}
+            changed = True
+        return changed
 
     def validate(self, config):
         if not isinstance(config, dict) or config.get("version") != 2:
@@ -224,6 +292,18 @@ class Store:
             if not isinstance(agent_defaults.get(agent), str):
                 raise ConfigError(f"Config agentDefaults.{agent} must be a string")
             self.require_profile(config, agent, agent_defaults.get(agent))
+        providers = config.get("providers")
+        if not isinstance(providers, dict):
+            raise ConfigError("Config providers must be an object")
+        for name, provider in providers.items():
+            self.validate_provider(name, provider)
+        provider_defaults = config.get("providerDefaults")
+        if not isinstance(provider_defaults, dict):
+            raise ConfigError("Config providerDefaults must be an object")
+        selected = provider_defaults.get("codex")
+        if not isinstance(selected, str):
+            raise ConfigError("Config providerDefaults.codex must be a string")
+        self.require_provider(config, selected)
         workspaces = config.get("workspaces", {})
         if not isinstance(workspaces, dict):
             raise ConfigError("Config workspaces must be an object")
@@ -231,6 +311,65 @@ class Store:
             if not isinstance(binding, dict):
                 raise ConfigError("Workspace bindings must be objects")
             self.require_profile(config, binding.get("agent"), binding.get("profile"))
+        provider_bindings = config.get("providerBindings")
+        if not isinstance(provider_bindings, dict):
+            raise ConfigError("Config providerBindings must be an object")
+        for provider in provider_bindings.values():
+            self.require_provider(config, provider)
+
+    @staticmethod
+    def validate_provider(name, provider):
+        if not NAME_PATTERN.match(name or ""):
+            raise ConfigError(f"Invalid provider name: {name}")
+        if name == DEFAULT_PROVIDER:
+            raise ConfigError(
+                f"The provider name {DEFAULT_PROVIDER!r} is reserved for the "
+                "agent's built-in account authentication"
+            )
+        if not isinstance(provider, dict):
+            raise ConfigError(f"Provider must be an object: {name}")
+        label = provider.get("label")
+        if not isinstance(label, str) or not label.strip() or len(label) > 80:
+            raise ConfigError(f"Invalid label for provider {name}")
+        base_url = provider.get("baseUrl")
+        if not isinstance(base_url, str) or not PROVIDER_URL_PATTERN.match(base_url):
+            raise ConfigError(
+                f"Provider {name} needs an http(s) baseUrl, for example "
+                "https://example.com/v1"
+            )
+        env_key = provider.get("envKey")
+        if not isinstance(env_key, str) or not PROVIDER_ENV_KEY_PATTERN.match(env_key):
+            raise ConfigError(
+                f"Provider {name} needs an envKey naming the environment variable "
+                "that holds its credential, for example EXAMPLE_API_KEY"
+            )
+        model = provider.get("model")
+        if not isinstance(model, str) or not model.strip() or len(model) > 120:
+            raise ConfigError(f"Provider {name} needs a model slug")
+        if provider.get("wireApi") not in PROVIDER_WIRE_APIS:
+            raise ConfigError(
+                f"Provider {name} wireApi must be one of "
+                + ", ".join(PROVIDER_WIRE_APIS)
+            )
+        reasoning = provider.get("reasoning")
+        if reasoning is not None and reasoning not in PROVIDER_REASONING:
+            raise ConfigError(
+                f"Provider {name} reasoning must be one of "
+                + ", ".join(PROVIDER_REASONING)
+            )
+
+    def require_provider(self, config, provider):
+        if provider == DEFAULT_PROVIDER:
+            return None
+        providers = config.get("providers", {})
+        if not isinstance(provider, str) or provider not in providers:
+            available = ", ".join(
+                [DEFAULT_PROVIDER] + sorted(providers)
+            )
+            raise ConfigError(
+                f"Unknown provider: {provider}. Available providers: {available}"
+            )
+        return providers[provider]
 
     def require_profile(self, config, agent, profile):
         if agent not in AGENTS:
@@ -548,9 +687,138 @@ class Store:
     def unbind(self, config, workspace):
         path = str(Path(workspace).expanduser().resolve())
         removed = config.setdefault("workspaces", {}).pop(path, None)
-        if removed:
+        released = config.setdefault("providerBindings", {}).pop(path, None)
+        if removed or released:
             self.save(config)
-        return removed is not None
+        return removed is not None or released is not None
+
+    def provider_selection(self, config, workspace, provider=None):
+        """Resolve which provider a launch should use.
+
+        An explicit flag wins, then a workspace binding, then the global
+        default. The provider is deliberately independent of the account
+        profile so that switching providers never changes `CODEX_HOME`, and
+        therefore never hides a home's session history.
+        """
+        if provider:
+            self.require_provider(config, provider)
+            return provider, None
+        bound, matched = self.workspace_provider(config, workspace)
+        if bound:
+            return bound, matched
+        selected = config.get("providerDefaults", {}).get("codex", DEFAULT_PROVIDER)
+        self.require_provider(config, selected)
+        return selected, None
+
+    def workspace_provider(self, config, workspace):
+        current = Path(workspace).expanduser().resolve()
+        bindings = config.get("providerBindings", {})
+        for candidate in (current,) + tuple(current.parents):
+            provider = bindings.get(str(candidate))
+            if provider:
+                self.require_provider(config, provider)
+                return provider, str(candidate)
+        return None, None
+
+    def add_provider(
+        self,
+        config,
+        name,
+        base_url,
+        env_key,
+        model,
+        label=None,
+        wire_api="responses",
+        reasoning=None,
+    ):
+        provider = {
+            "label": (label or name).strip(),
+            "baseUrl": base_url,
+            "envKey": env_key,
+            "model": model,
+            "wireApi": wire_api,
+        }
+        if reasoning:
+            provider["reasoning"] = reasoning
+        self.validate_provider(name, provider)
+        config.setdefault("providers", {})[name] = provider
+        self.save(config)
+        return provider
+
+    def remove_provider(self, config, name):
+        providers = config.setdefault("providers", {})
+        if name not in providers:
+            raise ConfigError(f"Unknown provider: {name}")
+        in_use = [
+            workspace
+            for workspace, provider in config.get("providerBindings", {}).items()
+            if provider == name
+        ]
+        removed = providers.pop(name)
+        for workspace in in_use:
+            config["providerBindings"].pop(workspace, None)
+        if config.get("providerDefaults", {}).get("codex") == name:
+            config.setdefault("providerDefaults", {})["codex"] = DEFAULT_PROVIDER
+        self.save(config)
+        return removed, in_use
+
+    def bind_provider(self, config, workspace, provider, globally=False):
+        self.require_provider(config, provider)
+        if globally:
+            config.setdefault("providerDefaults", {})["codex"] = provider
+        else:
+            # Provider bindings live in their own map so that routing a
+            # workspace through a provider never pins which account it uses.
+            path = str(Path(workspace).expanduser().resolve())
+            bindings = config.setdefault("providerBindings", {})
+            if provider == DEFAULT_PROVIDER:
+                bindings.pop(path, None)
+            else:
+                bindings[path] = provider
+        self.save(config)
+
+    @staticmethod
+    def codex_profile_name(provider):
+        return f"{provider}.config.toml"
+
+    def materialize_codex_provider(self, env, config, provider):
+        """Write the provider's Codex profile into the home this launch will use.
+
+        Codex reads a v2 profile from `<CODEX_HOME>/<name>.config.toml`, so the
+        file has to exist in every account home the provider is used from. It is
+        rendered fresh on each launch, which keeps the account homes in step
+        with the configuration and needs no credential: the file names the
+        environment variable, and Codex reads the value itself.
+        """
+        if provider == DEFAULT_PROVIDER:
+            return None
+        data = self.require_provider(config, provider)
+        home = env.get(HOME_ENV["codex"])
+        if not home:
+            raise ConfigError("Cannot resolve CODEX_HOME for the provider profile")
+        path = absolute_path(Path(home) / self.codex_profile_name(provider))
+        self._write_private_file(path, render_codex_provider_profile(provider, data))
+        return path
+
+    @staticmethod
+    def _write_private_file(path, text):
+        directory = path.parent
+        ensure_private_directory(directory)
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+        return path
 
     def add_profile(self, config, agent, name, label=None, shared=False):
         if agent not in AGENTS:

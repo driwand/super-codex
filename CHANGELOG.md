@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Model providers. `sc provider add|list|show|use|remove` defines OpenAI-compatible
+  endpoints, and `sc --provider <name>` routes a single launch through one. The provider
+  is rendered as a Codex profile written into whichever account home the launch uses, so
+  one definition works from every account. `default` is reserved for the account's own
+  authentication.
+- `--provider` on `sc start`, `sc ask`, and `sc resume`, a `provider` field in
+  `sc status --json`, and per-workspace provider bindings held in their own
+  `providerBindings` map so that routing a workspace through a provider never pins which
+  account that workspace uses. `sc unuse` releases both kinds of binding.
+
+### Changed
+
+- Configurations written before providers existed gain the `providers`,
+  `providerDefaults`, and `providerBindings` keys on load; the schema stays at version 2 and older releases
+  continue to read the file.
+
+### Security
+
+- Provider definitions store the name of the credential environment variable, never the
+  credential. Generated Codex profiles are written atomically with `0600` permissions.
+
+
 ## [0.6.0] - 2026-08-24
 
 ### Fixed

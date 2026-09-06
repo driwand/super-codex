@@ -239,7 +239,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(output)
         self.assertEqual(payload["schemaVersion"], 1)
-        self.assertEqual(payload["active"], {"agent": "codex", "profile": "main"})
+        self.assertEqual(
+            payload["active"],
+            {"agent": "codex", "profile": "main", "provider": "default"},
+        )
 
     def test_bindings_support_text_and_json(self):
         self.add_account_2()
@@ -549,3 +552,155 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProviderCliTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.state = Path(self.temporary.name) / "state"
+        self.codex_home = Path(self.temporary.name) / "codex"
+        (self.codex_home / "sessions").mkdir(parents=True)
+        (self.codex_home / "archived_sessions").mkdir()
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "SUPER_AGENT_HOME": str(self.state),
+                "CODEX_HOME": str(self.codex_home),
+                "SUPER_CODEX_SHARED_CODEX_HOME": str(self.codex_home),
+            },
+            clear=False,
+        )
+        self.environment.start()
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def output(self, arguments):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = main(arguments)
+        return code, stream.getvalue()
+
+    def add_account_2(self):
+        with patch("super_agent.cli.run_command", return_value=0):
+            code, _ = self.output(["profile", "add", "codex", "2", "--label", "Personal"])
+        self.assertEqual(code, 0)
+
+    def add_provider(self, name="explabs"):
+        code, output = self.output(
+            [
+                "provider",
+                "add",
+                name,
+                "--base-url",
+                "https://api.example.com/v1",
+                "--env-key",
+                "EXAMPLE_API_KEY",
+                "--model",
+                "example-model",
+                "--label",
+                "Example",
+            ]
+        )
+        self.assertEqual(code, 0)
+        return output
+
+    def test_add_lists_and_warns_about_a_missing_credential(self):
+        output = self.add_provider()
+        self.assertIn("Added provider explabs", output)
+        self.assertIn("export EXAMPLE_API_KEY", output)
+        code, listing = self.output(["provider", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("explabs", listing)
+        self.assertIn("NOT SET", listing)
+
+    def test_list_marks_the_default_as_active(self):
+        code, listing = self.output(["provider", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("* default", listing)
+
+    def test_launch_without_a_provider_has_no_profile_flag(self):
+        self.add_provider()
+        code, output = self.output(["start", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("--profile explabs", output)
+
+    def test_launch_with_provider_flag_adds_the_profile(self):
+        self.add_provider()
+        code, output = self.output(["start", "--provider", "explabs", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("--profile explabs", output)
+
+    def test_bound_provider_applies_without_a_flag(self):
+        self.add_provider()
+        self.output(["provider", "use", "explabs"])
+        code, output = self.output(["start", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("--profile explabs", output)
+        code, output = self.output(["start", "--provider", "default", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("codex", output)
+        self.assertNotIn("--profile explabs", output)
+
+    def test_launch_materializes_the_profile_into_the_codex_home(self):
+        self.add_provider()
+        with patch("super_agent.cli.exec_command", return_value=0) as run:
+            code = main(["start", "--provider", "explabs"])
+        self.assertEqual(code, 0)
+        self.assertIn("--profile", run.call_args.args[0])
+        written = self.codex_home / "explabs.config.toml"
+        self.assertTrue(written.is_file())
+        self.assertIn('base_url = "https://api.example.com/v1"', written.read_text())
+
+    def test_dry_run_writes_nothing(self):
+        self.add_provider()
+        self.output(["start", "--provider", "explabs", "--dry-run"])
+        self.assertFalse((self.codex_home / "explabs.config.toml").exists())
+
+    def test_unknown_provider_reports_the_available_ones(self):
+        code, _ = self.output(["start", "--provider", "nope", "--dry-run"])
+        self.assertEqual(code, 2)
+
+    def test_provider_is_rejected_for_claude(self):
+        self.add_provider()
+        code, _ = self.output(
+            ["start", "--agent", "claude", "--provider", "explabs", "--dry-run"]
+        )
+        self.assertEqual(code, 2)
+
+    def test_status_reports_the_active_provider(self):
+        self.add_provider()
+        self.output(["provider", "use", "explabs"])
+        code, output = self.output(["status"])
+        self.assertEqual(code, 0)
+        self.assertIn("Provider:  explabs", output)
+
+    def test_show_renders_the_generated_profile(self):
+        self.add_provider()
+        code, output = self.output(["provider", "show", "explabs"])
+        self.assertEqual(code, 0)
+        self.assertIn("[model_providers.explabs]", output)
+        self.assertIn('env_key = "EXAMPLE_API_KEY"', output)
+
+    def test_remove_returns_the_workspace_to_the_default(self):
+        self.add_provider()
+        self.output(["provider", "use", "explabs"])
+        code, output = self.output(["provider", "remove", "explabs"])
+        self.assertEqual(code, 0)
+        self.assertIn("Removed provider explabs", output)
+        code, output = self.output(["start", "--dry-run"])
+        self.assertNotIn("--profile explabs", output)
+
+    def test_account_switching_still_works_under_a_provider(self):
+        self.add_provider()
+        self.add_account_2()
+        self.output(["provider", "use", "explabs", "--global"])
+        with patch("super_agent.cli.exec_command", return_value=0) as run:
+            main(["2"])
+        env = run.call_args.args[1]
+        self.assertIn("--profile", run.call_args.args[0])
+        self.assertTrue(
+            (Path(env["CODEX_HOME"]) / "explabs.config.toml").is_file(),
+            "the provider profile must exist in the account home being launched",
+        )
