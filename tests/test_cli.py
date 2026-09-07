@@ -807,6 +807,53 @@ class SessionsCliTests(unittest.TestCase):
             changes[str(account)], {"main-only": "Main", "tie": "Main tie"}
         )
 
+    @patch("super_agent.cli.reconcile_session_names", return_value=0)
+    def test_shared_profile_session_is_pushed_after_codex_exits(self, names):
+        self.add_account_2()
+        account = self.account_home()
+        with patch("super_agent.cli.exec_command", return_value=0) as execute:
+            code, _ = self.output(["start", "--profile", "2"])
+        self.assertEqual(code, 0)
+        after = execute.call_args.kwargs["after"]
+        transcript = self.write_rollout(
+            account, "2026/09/08", "rollout-2026-09-08T10-00-00-new.jsonl"
+        )
+
+        after()
+
+        shared = self.codex_home / "sessions" / "2026" / "09" / "08" / transcript.name
+        self.assertEqual(shared.stat().st_ino, transcript.stat().st_ino)
+        names.assert_called_once()
+
+    @patch("super_agent.cli.reconcile_session_names", return_value=0)
+    def test_shared_store_session_is_pulled_after_codex_exits(self, names):
+        self.add_account_2()
+        account = self.account_home()
+        with patch("super_agent.cli.exec_command", return_value=0) as execute:
+            code, _ = self.output(["start", "--profile", "main"])
+        self.assertEqual(code, 0)
+        after = execute.call_args.kwargs["after"]
+        transcript = self.write_rollout(
+            self.codex_home,
+            "2026/09/08",
+            "rollout-2026-09-08T10-00-00-new.jsonl",
+        )
+
+        after()
+
+        pulled = account / "sessions" / "2026" / "09" / "08" / transcript.name
+        self.assertEqual(pulled.stat().st_ino, transcript.stat().st_ino)
+        names.assert_called_once()
+
+    def test_isolated_profile_does_not_schedule_post_exit_sharing(self):
+        self.add_account_2()
+        self.output(["sessions", "split", "--profile", "2"])
+        with patch("super_agent.cli.exec_command", return_value=0) as execute:
+            code, _ = self.output(["start", "--profile", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(execute.call_args.kwargs.get("after"))
+
     def test_status_reports_the_store_and_each_account(self):
         self.add_account_2()
         code, output = self.output(["sessions", "status"])

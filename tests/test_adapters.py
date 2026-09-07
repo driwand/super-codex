@@ -123,6 +123,19 @@ class CommandTests(unittest.TestCase):
             exec_command(["codex"], {}, "/missing", agent="codex")
 
     @patch("super_agent.adapters.executable", return_value="/bin/codex")
+    @patch("super_agent.adapters.run_command", return_value=7)
+    def test_exec_command_waits_and_runs_the_post_exit_callback(self, run, executable):
+        callbacks = []
+
+        status = exec_command(
+            ["codex"], {}, "/repo", agent="codex", after=lambda: callbacks.append(True)
+        )
+
+        self.assertEqual(status, 7)
+        run.assert_called_once_with(["codex"], {}, "/repo")
+        self.assertEqual(callbacks, [True])
+
+    @patch("super_agent.adapters.executable", return_value="/bin/codex")
     @patch("super_agent.adapters.subprocess.run", side_effect=KeyboardInterrupt)
     def test_run_command_normalizes_interrupted_login(self, run, executable):
         self.assertEqual(run_command(["codex", "login"], {}, "/repo"), 130)

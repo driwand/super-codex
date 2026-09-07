@@ -1,3 +1,3 @@
 """Codex-first account and workspace control plane for coding agents."""
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"

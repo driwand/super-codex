@@ -449,7 +449,9 @@ Providers apply to Codex. Claude uses its own account authentication and rejects
 ## Session history
 
 By default every Codex account, and a bare `codex`, reads and writes one session
-history. `sc resume <id>` works whichever account you launch, and so does the `codex
+history. `sc` reconciles it before launch and again after a normally exiting Codex
+process, including custom session names, so routine use requires neither `sync` nor
+`merge`. `sc resume <id>` works whichever account you launch, and so does the `codex
 resume` picker.
 
 ```bash
@@ -458,7 +460,7 @@ sc sessions merge --dry-run     # preview unifying transcripts recorded before s
 sc sessions merge               # unify them
 sc sessions split --profile 2   # keep account 2's future sessions to itself
 sc sessions share --profile 2   # put it back
-sc sessions sync                # reconcile now, without waiting for a launch
+sc sessions sync                # reconcile immediately instead of waiting for launch or exit
 ```
 
 The store is the shared Codex home, normally `~/.codex`, which is why a bare `codex`
@@ -470,14 +472,16 @@ account can already see, because removing a link could remove the only remaining
 
 Upgrading an existing installation shares sessions recorded from that point on and
 leaves the earlier ones where they are, so an upgrade does not silently reshape your
-resume picker. `sc sessions status` reports how many are waiting, and `sc sessions
-merge` unifies them.
+resume picker. `sc sessions status` reports how many are waiting, and one `sc sessions
+merge` unifies them permanently. Once status reports no cutoff or pending transcripts,
+repeating `merge` is unnecessary.
 
-`sc sessions sync` and `sc sessions merge` also reconcile active custom session names
-through Codex's experimental app-server API. The most recently updated non-empty name
-wins; the shared home wins an exact timestamp tie. Codex's SQLite databases remain
-account-local and are never copied or edited directly. This name API is experimental,
-so Super Codex reports protocol failures rather than silently guessing a database schema.
+Automatic post-exit synchronization, `sc sessions sync`, and `sc sessions merge` also
+reconcile active custom session names through Codex's experimental app-server API. The
+most recently updated non-empty name wins; the shared home wins an exact timestamp tie.
+Codex's SQLite databases remain account-local and are never copied or edited directly.
+This name API is experimental, so Super Codex reports protocol failures rather than
+silently guessing a database schema.
 
 These groups follow the shared store, and `sc sessions include` / `sc sessions exclude`
 change the set:

@@ -169,7 +169,7 @@ def parser():
     )
     sessions_split.add_argument("--profile")
     sessions_sync = session_commands.add_parser(
-        "sync", help="Reconcile now instead of waiting for the next launch"
+        "sync", help="Reconcile immediately instead of waiting for launch or exit"
     )
     sessions_sync.add_argument("--profile")
     sessions_include = session_commands.add_parser(
@@ -766,6 +766,25 @@ def session_sharing_note(store, config, agent, profile):
     return "shared with every account and with a bare codex"
 
 
+def post_session_sync(store, config, agent, profile):
+    if agent != "codex" or store.session_sharing_mode(config, profile) != "shared":
+        return None
+    groups = set(store.session_sharing_groups(config))
+    if not groups.intersection(
+        {"sessions", "archived_sessions", "attachments", "history"}
+    ):
+        return None
+    targets = store.codex_homes(config)
+    if not any(row["isolated"] and row["mode"] == "shared" for row in targets):
+        return None
+
+    def synchronize():
+        store.reconcile_sessions(config)
+        reconcile_session_names(store, config)
+
+    return synchronize
+
+
 def run_status(store, config, cwd, live=False, json_output=False):
     agent, profile, matched = store.selection(config, cwd)
     provider, provider_matched = store.provider_selection(config, cwd)
@@ -958,7 +977,14 @@ def main(argv=None):
                 mcp_command=launcher_command() if agent == "codex" else None,
                 provider=None if provider == DEFAULT_PROVIDER else provider,
             )
-            return exec_command(command, env, cwd, args.dry_run, agent)
+            after = (
+                None
+                if args.dry_run
+                else post_session_sync(store, config, agent, profile)
+            )
+            return exec_command(
+                command, env, cwd, args.dry_run, agent, after=after
+            )
         if args.command == "status":
             return run_status(store, config, cwd, args.live, args.json)
         if args.command == "usage":

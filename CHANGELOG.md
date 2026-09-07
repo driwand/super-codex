@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-07
+
+### Fixed
+
+- Shared Codex assets and custom session names now reconcile again after every normally
+  exiting `sc`-launched Codex process. Sessions created under an isolated account reach
+  the shared store without a later manual `sync` or repeated `merge`; sharing remains the
+  default, and `merge` remains only the one-time upgrade step for pre-sharing history.
+
 ## [0.8.0] - 2026-09-06
 
 ### Added

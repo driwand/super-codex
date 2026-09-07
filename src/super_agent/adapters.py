@@ -517,10 +517,14 @@ def format_codex_live(status):
     return lines
 
 
-def exec_command(command, env, cwd, dry_run=False, agent=None):
+def exec_command(command, env, cwd, dry_run=False, agent=None, after=None):
     if dry_run:
         print(command_display(command, env, agent))
         return 0
+    if after is not None:
+        status = run_command(command, env, cwd)
+        after()
+        return status
     if not executable(command[0]):
         raise AdapterError(f"{command[0]} is not installed or not on PATH")
     try:
