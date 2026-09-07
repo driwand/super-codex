@@ -15,6 +15,8 @@ from super_agent.adapters import (
     auth_status,
     build_command,
     codex_live_status,
+    codex_set_thread_names,
+    codex_thread_names,
     exec_command,
     format_codex_live,
     run_command,
@@ -31,7 +33,7 @@ class CommandTests(unittest.TestCase):
                 "-C",
                 "/repo",
                 "-c",
-                'tui.status_line=["model-with-reasoning", "weekly-limit", "git-branch", "current-dir"]',
+                'tui.status_line=["model-with-reasoning", "five-hour-limit", "weekly-limit", "git-branch", "current-dir"]',
                 "--model",
                 "gpt-test",
                 "fix it",
@@ -56,7 +58,7 @@ class CommandTests(unittest.TestCase):
                 "/repo",
                 "--last",
                 "-c",
-                'tui.status_line=["model-with-reasoning", "weekly-limit", "git-branch", "current-dir"]',
+                'tui.status_line=["model-with-reasoning", "five-hour-limit", "weekly-limit", "git-branch", "current-dir"]',
             ],
         )
 
@@ -124,6 +126,92 @@ class CommandTests(unittest.TestCase):
     @patch("super_agent.adapters.subprocess.run", side_effect=KeyboardInterrupt)
     def test_run_command_normalizes_interrupted_login(self, run, executable):
         self.assertEqual(run_command(["codex", "login"], {}, "/repo"), 130)
+
+
+class ThreadNameTests(unittest.TestCase):
+    @patch("super_agent.adapters.executable", return_value="/bin/codex")
+    @patch("super_agent.adapters._app_server_requests")
+    def test_thread_names_follow_paginated_app_server_results(self, exchange, executable):
+        exchange.side_effect = [
+            (
+                {
+                    2: {
+                        "id": 2,
+                        "result": {
+                            "data": [
+                                {"id": "thread-1", "name": "First", "updatedAt": 10},
+                                {"id": "thread-2", "name": None, "updatedAt": 20},
+                            ],
+                            "nextCursor": "next-page",
+                        },
+                    }
+                },
+                [],
+                0,
+            ),
+            (
+                {
+                    2: {
+                        "id": 2,
+                        "result": {
+                            "data": [
+                                {"id": "thread-3", "name": "Third", "updatedAt": 30}
+                            ],
+                            "nextCursor": None,
+                        },
+                    }
+                },
+                [],
+                0,
+            ),
+        ]
+
+        names = codex_thread_names({"CODEX_HOME": "/codex"})
+
+        self.assertEqual(names["thread-1"], {"name": "First", "updatedAt": 10})
+        self.assertEqual(names["thread-2"], {"name": None, "updatedAt": 20})
+        self.assertEqual(names["thread-3"], {"name": "Third", "updatedAt": 30})
+        first = exchange.call_args_list[0].args[1][-1]
+        second = exchange.call_args_list[1].args[1][-1]
+        self.assertFalse(first["params"]["useStateDbOnly"])
+        self.assertNotIn("cursor", first["params"])
+        self.assertEqual(second["params"]["cursor"], "next-page")
+
+    @patch("super_agent.adapters.executable", return_value="/bin/codex")
+    @patch("super_agent.adapters._app_server_requests")
+    def test_thread_names_surface_protocol_errors(self, exchange, executable):
+        exchange.return_value = (
+            {2: {"id": 2, "error": {"message": "unsupported"}}},
+            [],
+            0,
+        )
+        with self.assertRaisesRegex(AdapterError, "unsupported"):
+            codex_thread_names({"CODEX_HOME": "/codex"})
+
+    @patch("super_agent.adapters.executable", return_value="/bin/codex")
+    @patch("super_agent.adapters._app_server_requests")
+    def test_sets_names_through_the_app_server(self, exchange, executable):
+        exchange.return_value = (
+            {2: {"id": 2, "result": {}}, 3: {"id": 3, "result": {}}},
+            [],
+            0,
+        )
+
+        applied = codex_set_thread_names(
+            {"CODEX_HOME": "/codex"}, {"thread-2": "Second", "thread-1": "First"}
+        )
+
+        self.assertEqual(applied, 2)
+        requests = exchange.call_args.args[1]
+        self.assertEqual(requests[2]["method"], "thread/name/set")
+        self.assertEqual(
+            [request["params"] for request in requests[2:]],
+            [
+                {"threadId": "thread-1", "name": "First"},
+                {"threadId": "thread-2", "name": "Second"},
+            ],
+        )
+        self.assertTrue(requests[0]["params"]["capabilities"]["experimentalApi"])
 
 
 class StatusTests(unittest.TestCase):

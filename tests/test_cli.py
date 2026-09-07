@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from super_agent.cli import _picker_lines, choose_profile, main
+from super_agent.cli import _picker_lines, choose_profile, main, reconcile_session_names
 from super_agent.config import Store
 
 
@@ -151,8 +151,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("codex -C", output)
         self.assertIn("model-with-reasoning", output)
+        self.assertIn("five-hour-limit", output)
         self.assertIn("weekly-limit", output)
-        self.assertNotIn("five-hour-limit", output)
         self.assertIn("git-branch", output)
         self.assertIn("current-dir", output)
         self.assertNotIn("CODEX_HOME=", output)
@@ -165,6 +165,19 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("CODEX_HOME=", output)
         self.assertIn("profiles/codex/2", output)
+
+    def test_every_codex_profile_uses_the_same_rate_limit_status_line(self):
+        self.add_account_2()
+        expected = (
+            'tui.status_line=["model-with-reasoning", "five-hour-limit", '
+            '"weekly-limit", "git-branch", "current-dir"]'
+        )
+        for profile in ("main", "2"):
+            code, output = self.output(
+                ["start", "--agent", "codex", "--profile", profile, "--dry-run"]
+            )
+            self.assertEqual(code, 0)
+            self.assertIn(expected, output)
 
     def test_workspace_binding_changes_default_launch(self):
         self.add_account_2()
@@ -704,3 +717,235 @@ class ProviderCliTests(unittest.TestCase):
             (Path(env["CODEX_HOME"]) / "explabs.config.toml").is_file(),
             "the provider profile must exist in the account home being launched",
         )
+
+
+class SessionsCliTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.state = Path(self.temporary.name) / "state"
+        self.codex_home = Path(self.temporary.name) / "codex"
+        (self.codex_home / "sessions").mkdir(parents=True)
+        (self.codex_home / "archived_sessions").mkdir()
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "SUPER_AGENT_HOME": str(self.state),
+                "CODEX_HOME": str(self.codex_home),
+                "SUPER_CODEX_SHARED_CODEX_HOME": str(self.codex_home),
+            },
+            clear=False,
+        )
+        self.environment.start()
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def output(self, arguments):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = main(arguments)
+        return code, stream.getvalue()
+
+    def add_account_2(self):
+        with patch("super_agent.cli.run_command", return_value=0):
+            code, _ = self.output(["profile", "add", "codex", "2", "--label", "Personal"])
+        self.assertEqual(code, 0)
+
+    def account_home(self):
+        store = Store(self.state)
+        return store.profile_home("codex", "2", store.load(), create=True)
+
+    def write_rollout(self, home, day, name):
+        directory = Path(home) / "sessions" / day
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_text("transcript", encoding="utf-8")
+        return path
+
+    def set_cutoff(self, since):
+        store = Store(self.state)
+        config = store.load()
+        config["sessionSharing"]["since"] = since
+        store.save(config)
+
+    @patch("super_agent.cli.codex_set_thread_names")
+    @patch("super_agent.cli.codex_thread_names")
+    def test_session_names_use_the_most_recent_nonempty_name(self, listed, renamed):
+        self.add_account_2()
+        store = Store(self.state)
+        config = store.load()
+        account = self.account_home()
+
+        def metadata(env):
+            if env["CODEX_HOME"] == str(self.codex_home):
+                return {
+                    "main-only": {"name": "Main", "updatedAt": 10},
+                    "account-newer": {"name": "Old", "updatedAt": 20},
+                    "tie": {"name": "Main tie", "updatedAt": 30},
+                }
+            return {
+                "main-only": {"name": None, "updatedAt": 15},
+                "account-newer": {"name": "New", "updatedAt": 40},
+                "tie": {"name": "Account tie", "updatedAt": 30},
+            }
+
+        changes = {}
+
+        def apply(env, updates):
+            changes[env["CODEX_HOME"]] = updates
+            return len(updates)
+
+        listed.side_effect = metadata
+        renamed.side_effect = apply
+
+        applied = reconcile_session_names(store, config)
+
+        self.assertEqual(applied, 3)
+        self.assertEqual(changes[str(self.codex_home)], {"account-newer": "New"})
+        self.assertEqual(
+            changes[str(account)], {"main-only": "Main", "tie": "Main tie"}
+        )
+
+    def test_status_reports_the_store_and_each_account(self):
+        self.add_account_2()
+        code, output = self.output(["sessions", "status"])
+        self.assertEqual(code, 0)
+        self.assertIn(str(self.codex_home), output)
+        self.assertIn("shared by default", output)
+        self.assertIn("Personal", output)
+
+    def test_status_json_describes_sharing(self):
+        self.add_account_2()
+        code, output = self.output(["sessions", "status", "--json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["default"], "shared")
+        self.assertEqual(payload["store"], str(self.codex_home))
+        self.assertEqual(
+            {row["profile"] for row in payload["accounts"]}, {"main", "2"}
+        )
+
+    def test_status_counts_the_backlog_a_cutoff_holds_back(self):
+        self.add_account_2()
+        self.account_home()
+        self.set_cutoff("2026-09-06T00:00:00Z")
+        self.write_rollout(
+            self.codex_home, "2026/07/01", "rollout-2026-07-01T10-00-00-old.jsonl"
+        )
+        code, output = self.output(["sessions", "status"])
+        self.assertEqual(code, 0)
+        self.assertIn("1 not unified", output)
+        self.assertIn("sc sessions merge --dry-run", output)
+
+    def test_a_dry_run_merge_reports_without_writing(self):
+        self.add_account_2()
+        account = self.account_home()
+        self.set_cutoff("2026-09-06T00:00:00Z")
+        self.write_rollout(
+            self.codex_home, "2026/07/01", "rollout-2026-07-01T10-00-00-old.jsonl"
+        )
+        code, output = self.output(["sessions", "merge", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertIn("Would unify 1 transcripts", output)
+        self.assertIn("Nothing was written", output)
+        self.assertFalse((account / "sessions" / "2026" / "07").exists())
+
+    @patch("super_agent.cli.reconcile_session_names", return_value=0)
+    def test_merge_unifies_the_backlog(self, names):
+        self.add_account_2()
+        account = self.account_home()
+        self.set_cutoff("2026-09-06T00:00:00Z")
+        transcript = self.write_rollout(
+            self.codex_home, "2026/07/01", "rollout-2026-07-01T10-00-00-old.jsonl"
+        )
+        code, output = self.output(["sessions", "merge"])
+        self.assertEqual(code, 0)
+        self.assertIn("Unified 1 transcripts", output)
+        linked = account / "sessions" / "2026" / "07" / "01" / transcript.name
+        self.assertEqual(linked.stat().st_ino, transcript.stat().st_ino)
+        self.assertIsNone(Store(self.state).load()["sessionSharing"]["since"])
+
+    @patch("super_agent.cli.reconcile_session_names", return_value=2)
+    def test_sync_reports_session_names_and_configuration(self, names):
+        self.add_account_2()
+        (self.codex_home / "config.toml").write_text("model = 'shared'\n", encoding="utf-8")
+
+        code, output = self.output(["sessions", "sync"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("synchronized 2 session names", output)
+        self.assertIn("refreshed 1 configuration files", output)
+
+    def test_split_and_share_toggle_one_account(self):
+        self.add_account_2()
+        code, output = self.output(["sessions", "split", "--profile", "2"])
+        self.assertEqual(code, 0)
+        self.assertIn("private to profile 2", output)
+        store = Store(self.state)
+        self.assertEqual(
+            store.session_sharing_mode(store.load(), "2"), "isolated"
+        )
+        code, output = self.output(["sessions", "share", "--profile", "2"])
+        self.assertEqual(code, 0)
+        self.assertIn("Sharing session history", output)
+        store = Store(self.state)
+        self.assertEqual(store.session_sharing_mode(store.load(), "2"), "shared")
+
+    def test_split_does_not_unlink_what_is_already_shared(self):
+        self.add_account_2()
+        account = self.account_home()
+        transcript = self.write_rollout(
+            self.codex_home, "2026/09/06", "rollout-2026-09-06T10-00-00-aaa.jsonl"
+        )
+        Store(self.state).environment("codex", "2", Store(self.state).load())
+        linked = account / "sessions" / "2026" / "09" / "06" / transcript.name
+        self.assertTrue(linked.exists())
+        code, _ = self.output(["sessions", "split", "--profile", "2"])
+        self.assertEqual(code, 0)
+        self.assertTrue(linked.exists())
+
+    def test_include_and_exclude_change_the_shared_groups(self):
+        code, output = self.output(["sessions", "exclude", "config"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("config", output.split(":", 1)[1])
+        code, output = self.output(["sessions", "include", "config"])
+        self.assertEqual(code, 0)
+        self.assertIn("config", output)
+
+    def test_an_unknown_group_is_refused_by_the_parser(self):
+        with self.assertRaises(SystemExit):
+            with redirect_stdout(io.StringIO()):
+                main(["sessions", "include", "secrets"])
+
+    def test_status_names_where_the_active_account_records_sessions(self):
+        code, output = self.output(["status"])
+        self.assertEqual(code, 0)
+        self.assertIn("Sessions:", output)
+        self.assertIn("shared with every account", output)
+
+    def test_resume_adopts_a_session_recorded_by_another_account(self):
+        self.add_account_2()
+        account = self.account_home()
+        self.output(["sessions", "split", "--profile", "2"])
+        transcript = self.write_rollout(
+            account, "2026/09/07", "rollout-2026-09-07T08-00-00-eeee.jsonl"
+        )
+        with patch("super_agent.cli.exec_command", return_value=0):
+            code, output = self.output(["resume", "eeee", "--profile", "main"])
+        self.assertEqual(code, 0)
+        self.assertIn("Adopted", output)
+        adopted = (
+            self.codex_home / "sessions" / "2026" / "09" / "07" / transcript.name
+        )
+        self.assertEqual(adopted.stat().st_ino, transcript.stat().st_ino)
+
+    def test_resume_leaves_a_known_session_alone(self):
+        self.add_account_2()
+        self.write_rollout(
+            self.codex_home, "2026/09/07", "rollout-2026-09-07T08-00-00-ffff.jsonl"
+        )
+        with patch("super_agent.cli.exec_command", return_value=0):
+            code, output = self.output(["resume", "ffff", "--profile", "main"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("Adopted", output)

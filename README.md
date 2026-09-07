@@ -5,7 +5,7 @@ A local, Codex-first control plane for using multiple Codex accounts and consult
 > **Disclaimer:** This project is **FULLY vibe coded**. Review the source and test
 > it in your own environment before relying on it.
 
-Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Codex remains the main interface. Account credentials and local Codex session history stay isolated per account, and Claude is exposed to Codex as a read-only consultation tool.
+Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Codex remains the main interface. Account credentials stay isolated per account, local Codex session history is shared across accounts by default, and Claude is exposed to Codex as a read-only consultation tool.
 
 ## What it does
 
@@ -15,7 +15,7 @@ Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Co
 - Shows an arrow-key account picker with each account's identity and current limits when you run bare `sc`.
 - Lets you designate any configured Codex profile as the main account.
 - Lets you reorder accounts and globally switch bare `sc` between the picker and `main`.
-- Keeps Codex session and archived-session history separate per Codex profile.
+- Shares Codex session and archived-session history across every account and a bare `codex`, or keeps it separate per profile.
 - Routes any account through an OpenAI-compatible model provider without changing where its sessions are stored.
 - Gives every `sc`-launched Codex session a read-only `ask_claude` MCP tool.
 - Keeps longer Claude consultations running as monitored, cancellable background jobs.
@@ -166,10 +166,10 @@ sc config mode select
 ```
 
 Interactive Codex sessions launched by `sc start`, bare `sc`, or `sc resume` use
-Codex's native status line to show the model and reasoning level, weekly usage
-remaining, the current Git branch, and the working directory. Codex omits usage
-or branch fields when their data is unavailable. The override applies only to the
-launched session and does not modify the profile's `config.toml`.
+one status line for every profile. It shows the model and reasoning level, five-hour
+and weekly usage remaining, the current Git branch, and the working directory. Codex
+omits usage or branch fields when their data is unavailable. The override applies only
+to the launched session and does not modify the profile's `config.toml`.
 
 Then ask naturally inside Codex:
 
@@ -206,6 +206,11 @@ sc resume --profile main
 sc resume --profile 2
 sc resume --profile 2 --last
 ```
+
+With sharing on, any account resumes any session, so `--profile` selects which account
+pays for the next turn rather than which history you can reach. If the id belongs to an
+account you have deliberately split off, `sc resume` finds that transcript and links it
+into the account you are launching.
 
 Do not resume the exact same session concurrently from two accounts; both processes would append to the same local transcript.
 
@@ -299,11 +304,11 @@ Changing the logical main account also changes the global Codex default when Cod
 
 Codex officially supports relocating state with `CODEX_HOME`. Super Codex preserves
 an exported shared home across direct and nested launches and keeps isolated provider
-homes separate, including their `sessions` and `archived_sessions` directories. Codex
-canonicalizes rollout paths and refuses any rollout that resolves outside `CODEX_HOME`,
-so linked session directories break thread forking. Session directories linked by
-releases before 0.6.0 are converted once into real directories that hard link the shared
-transcripts, so history already indexed by that profile stays available.
+homes separate. Codex canonicalizes rollout paths and refuses any rollout that resolves
+outside `CODEX_HOME`, so a symbolic link to a shared session directory breaks thread
+forking. Shared transcripts are therefore hard links: one file on disk, with a real name
+inside every account home. Session directories linked by releases before 0.6.0 are
+converted once into real directories.
 
 Isolated Claude profiles use `CLAUDE_CONFIG_DIR`, which works in current Claude Code
 releases but is not documented as a stable public interface. Super Codex remembers
@@ -311,7 +316,10 @@ whether that variable was exported before entering an isolated profile so a nest
 shared-profile launch restores the original value or its absence; the default Claude
 profile therefore remains shared.
 
-Isolation covers provider configuration, credentials, logs, account-specific databases, and Codex transcripts stored in that provider home. Each account records new sessions in its own home, so a session started under one account is resumed under that same account. It does not isolate operating-system state such as Git configuration, SSH keys, keychains, browser sessions, or files accessible to the launched agent.
+Isolation covers provider configuration, credentials, logs, and account-specific
+databases stored in that provider home. It does not isolate operating-system state such
+as Git configuration, SSH keys, keychains, browser sessions, or files accessible to the
+launched agent. Session history is shared by default; see below.
 
 ## Claude inside Codex
 
@@ -437,6 +445,59 @@ still looks correct in the same shell.
 
 Providers apply to Codex. Claude uses its own account authentication and rejects
 `--provider`.
+
+## Session history
+
+By default every Codex account, and a bare `codex`, reads and writes one session
+history. `sc resume <id>` works whichever account you launch, and so does the `codex
+resume` picker.
+
+```bash
+sc sessions status              # where each account records sessions
+sc sessions merge --dry-run     # preview unifying transcripts recorded before sharing
+sc sessions merge               # unify them
+sc sessions split --profile 2   # keep account 2's future sessions to itself
+sc sessions share --profile 2   # put it back
+sc sessions sync                # reconcile now, without waiting for a launch
+```
+
+The store is the shared Codex home, normally `~/.codex`, which is why a bare `codex`
+sees the same history. Sharing costs no disk space: a shared transcript is one file with
+a hard link in each account home, not a copy. The homes must therefore be on the same
+filesystem; if they are not, Super Codex fails without creating a divergent copy. Nothing
+is ever deleted, and `sc sessions split` stops future sharing without unlinking what an
+account can already see, because removing a link could remove the only remaining copy.
+
+Upgrading an existing installation shares sessions recorded from that point on and
+leaves the earlier ones where they are, so an upgrade does not silently reshape your
+resume picker. `sc sessions status` reports how many are waiting, and `sc sessions
+merge` unifies them.
+
+`sc sessions sync` and `sc sessions merge` also reconcile active custom session names
+through Codex's experimental app-server API. The most recently updated non-empty name
+wins; the shared home wins an exact timestamp tie. Codex's SQLite databases remain
+account-local and are never copied or edited directly. This name API is experimental,
+so Super Codex reports protocol failures rather than silently guessing a database schema.
+
+These groups follow the shared store, and `sc sessions include` / `sc sessions exclude`
+change the set:
+
+| Group | What it covers |
+| --- | --- |
+| `sessions` | Session transcripts |
+| `archived_sessions` | Archived transcripts |
+| `attachments` | Images attached to a session |
+| `history` | The typed-prompt history behind the up arrow |
+| `config` | `config.toml` and the sibling `*.config.toml` provider profiles |
+
+`config` is a copy, not a link, because Codex rewrites `config.toml` whenever a setting
+changes. The shared Codex home is the source of truth for it: edit there, and each
+account picks the file up on its next launch, keeping a timestamped backup of what it
+replaced. Edits made inside an isolated account home are overwritten. Exclude the group
+to give an account its own settings.
+
+`auth.json` is never shared, read, or copied under any setting. It is what makes the
+accounts different accounts.
 
 ## Configuration
 

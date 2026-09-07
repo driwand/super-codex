@@ -6,6 +6,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-06
+
+### Added
+
+- Shared Codex session history. Every account, and a bare `codex`, now read and write one
+  session history by default, so `sc resume <id>` works whichever account you launch and
+  the `codex resume` picker offers the same sessions everywhere. A shared transcript is
+  one file with a hard link in each account home, so sharing costs no disk space and
+  copies nothing.
+- `sc sessions status|merge|share|split|sync|include|exclude`. `status` reports where each
+  account records sessions and how many transcripts predate sharing, `merge --dry-run`
+  previews unifying them, and `share`/`split` turn sharing on or off globally or for one
+  account.
+- Prompt history, attachments, and Codex configuration follow the shared store alongside
+  transcripts; `sc sessions include` and `sc sessions exclude` change the set. Transcripts,
+  attachments, and prompt history are hard linked. Configuration is copied instead,
+  because Codex rewrites `config.toml` whenever a setting changes and a hard link would
+  silently break; the shared Codex home is its source of truth and the copy keeps a
+  timestamped backup of what it replaced.
+- `sc resume <id>` finds a session recorded by another account and links that transcript
+  into the account being launched, so an id resolves even for an account deliberately
+  split off. Only transcript filenames are inspected.
+- A `sessionSharing` block in `sc status --json` and a `Sessions:` line in `sc status`.
+- Active custom session names are reconciled through Codex's app-server during `sc sessions
+  sync` and `sc sessions merge`; provider SQLite databases remain account-local.
+
+### Changed
+
+- Codex transcripts are shared across accounts again, this time without breaking thread
+  forking. Codex canonicalizes rollout paths and refuses any that resolve outside
+  `CODEX_HOME`, which is what made the symbolic links used before 0.6.0 fail; hard links
+  give each home a real name for the same file and satisfy that check.
+- Upgrading shares sessions recorded from the upgrade onward and leaves earlier ones where
+  they are, so an upgrade does not silently reshape the resume picker. `sc sessions status`
+  reports the backlog and `sc sessions merge` unifies it.
+- Session directories the shared store already owns are no longer re-permissioned on every
+  launch; a directory Super Codex creates is still private.
+- A hard-link failure now stops synchronization instead of silently creating a divergent
+  copy, and copied configuration is replaced atomically with collision-safe backups.
+- Every Codex profile uses the same injected status line with both five-hour and weekly
+  usage remaining, model and reasoning, Git branch, and current directory.
+
+### Security
+
+- `auth.json` is never shared, read, or copied under any setting, and only the named asset
+  groups are ever linked or copied. Account databases, logs, installation identifiers, and
+  every other file in a provider home stay strictly per account.
+- `sc sessions split` stops future sharing without unlinking anything an account can
+  already see, because removing a hard link could remove the only remaining copy.
+
 ## [0.7.0] - 2026-09-06
 
 ### Added

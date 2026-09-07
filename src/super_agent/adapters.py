@@ -29,6 +29,7 @@ CLAUDE_ROUTING_INSTRUCTIONS = (
 )
 CODEX_TUI_STATUS_LINE = (
     "model-with-reasoning",
+    "five-hour-limit",
     "weekly-limit",
     "git-branch",
     "current-dir",
@@ -185,6 +186,109 @@ def _app_server_requests(env, messages, timeout):
                 process.kill()
                 process.wait(timeout=2)
     return responses, [error for error in errors if error], process.returncode
+
+
+def _app_server_messages(requests):
+    return [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "super-codex",
+                    "title": "Super Codex",
+                    "version": __version__,
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        },
+        {"method": "initialized"},
+        *requests,
+    ]
+
+
+def codex_thread_names(env, timeout=30):
+    if not executable("codex"):
+        raise AdapterError("codex is not installed")
+    threads = {}
+    cursor = None
+    seen_cursors = set()
+    while True:
+        params = {
+            "archived": False,
+            "limit": 100,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "useStateDbOnly": False,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        messages = _app_server_messages(
+            [{"id": 2, "method": "thread/list", "params": params}]
+        )
+        responses, errors, return_code = _app_server_requests(env, messages, timeout)
+        message = responses.get(2, {})
+        error = message.get("error")
+        if error:
+            raise AdapterError(error.get("message", "Codex thread listing failed"))
+        if 2 not in responses:
+            reason = errors[-1] if errors else f"Codex app-server exited with {return_code}"
+            raise AdapterError(reason)
+        result = message.get("result") or {}
+        data = result.get("data")
+        if not isinstance(data, list):
+            raise AdapterError("Codex thread listing returned an invalid response")
+        for thread in data:
+            if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
+                continue
+            name = thread.get("name")
+            updated = thread.get("updatedAt")
+            threads[thread["id"]] = {
+                "name": name if isinstance(name, str) and name.strip() else None,
+                "updatedAt": updated if isinstance(updated, (int, float)) else 0,
+            }
+        cursor = result.get("nextCursor")
+        if not cursor:
+            return threads
+        if not isinstance(cursor, str) or cursor in seen_cursors:
+            raise AdapterError("Codex thread listing returned an invalid cursor")
+        seen_cursors.add(cursor)
+
+
+def codex_set_thread_names(env, updates, timeout=30):
+    items = sorted(
+        (thread_id, name)
+        for thread_id, name in updates.items()
+        if isinstance(thread_id, str) and isinstance(name, str) and name.strip()
+    )
+    if not items:
+        return 0
+    if not executable("codex"):
+        raise AdapterError("codex is not installed")
+    applied = 0
+    for offset in range(0, len(items), 100):
+        batch = items[offset : offset + 100]
+        requests = [
+            {
+                "id": index + 2,
+                "method": "thread/name/set",
+                "params": {"threadId": thread_id, "name": name},
+            }
+            for index, (thread_id, name) in enumerate(batch)
+        ]
+        responses, errors, return_code = _app_server_requests(
+            env, _app_server_messages(requests), timeout
+        )
+        for request in requests:
+            message = responses.get(request["id"], {})
+            error = message.get("error")
+            if error:
+                raise AdapterError(error.get("message", "Codex thread rename failed"))
+            if request["id"] not in responses:
+                reason = errors[-1] if errors else f"Codex app-server exited with {return_code}"
+                raise AdapterError(reason)
+        applied += len(batch)
+    return applied
 
 
 def codex_live_status(env, timeout=12, sqlite_home=None):

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from super_agent.config import (
     DEFAULT_PROVIDER,
+    SHARING_GROUPS,
     ConfigError,
     SHARED_CLAUDE_HOME_ENV,
     SHARED_CODEX_HOME_ENV,
@@ -572,3 +573,404 @@ class ProviderTests(unittest.TestCase):
                   "envKey": "K", "wireApi": "responses"}
         )
         self.assertIn('name = "a \\"quoted\\" label"', rendered)
+
+
+class SessionSharingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.home = Path(self.temporary.name) / "state"
+        self.codex_home = Path(self.temporary.name) / "main-codex"
+        (self.codex_home / "sessions").mkdir(parents=True)
+        (self.codex_home / "archived_sessions").mkdir()
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "CODEX_HOME": str(self.codex_home),
+                SHARED_CODEX_HOME_ENV: str(self.codex_home),
+            },
+            clear=False,
+        )
+        self.environment.start()
+        self.store = Store(self.home)
+        self.config = self.store.load()
+        self.store.add_profile(self.config, "codex", "2", "Personal")
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def account_home(self):
+        return self.store.profile_home("codex", "2", self.config, create=True)
+
+    def write_rollout(self, home, day, name, text="transcript"):
+        directory = Path(home) / "sessions" / day
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_new_configurations_share_every_group_without_a_cutoff(self):
+        sharing = self.config["sessionSharing"]
+        self.assertEqual(sharing["default"], "shared")
+        self.assertIsNone(sharing["since"])
+        self.assertEqual(sharing["include"], list(SHARING_GROUPS))
+
+    def test_transcripts_reach_both_homes_as_one_inode(self):
+        shared = self.write_rollout(
+            self.codex_home, "2026/09/06", "rollout-2026-09-06T10-00-00-aaa.jsonl"
+        )
+        account = self.account_home()
+        own = self.write_rollout(
+            account, "2026/09/06", "rollout-2026-09-06T11-00-00-bbb.jsonl"
+        )
+
+        self.store.environment("codex", "2", self.config)
+
+        pulled = account / "sessions" / "2026" / "09" / "06" / shared.name
+        pushed = self.codex_home / "sessions" / "2026" / "09" / "06" / own.name
+        self.assertEqual(pulled.stat().st_ino, shared.stat().st_ino)
+        self.assertEqual(pushed.stat().st_ino, own.stat().st_ino)
+
+    def test_transcript_sharing_refuses_to_create_a_diverging_copy(self):
+        shared = self.write_rollout(
+            self.codex_home, "2026/09/06", "rollout-2026-09-06T10-00-00-aaa.jsonl"
+        )
+        account = self.account_home()
+
+        with patch("super_agent.config.os.link", side_effect=OSError("cross-device")):
+            with self.assertRaisesRegex(ConfigError, "same filesystem"):
+                self.store._link_session_tree(
+                    self.codex_home / "sessions", account / "sessions"
+                )
+
+        destination = account / "sessions" / "2026" / "09" / "06" / shared.name
+        self.assertFalse(destination.exists())
+
+    def test_transcript_sharing_refuses_an_existing_conflicting_file(self):
+        shared = self.write_rollout(
+            self.codex_home,
+            "2026/09/06",
+            "rollout-2026-09-06T10-00-00-aaa.jsonl",
+            "shared",
+        )
+        account = self.account_home()
+        conflicting = self.write_rollout(
+            account, "2026/09/06", shared.name, "account"
+        )
+
+        with self.assertRaisesRegex(ConfigError, "conflicting shared Codex asset"):
+            self.store._link_session_tree(
+                self.codex_home / "sessions", account / "sessions"
+            )
+
+        self.assertEqual(conflicting.read_text(encoding="utf-8"), "account")
+
+    def test_reconciling_twice_changes_nothing(self):
+        shared = self.write_rollout(
+            self.codex_home, "2026/09/06", "rollout-2026-09-06T10-00-00-aaa.jsonl"
+        )
+        self.store.environment("codex", "2", self.config)
+        first = self.store.reconcile_sessions(self.config)
+        self.assertEqual(sum(r["pulled"] + r["pushed"] for r in first), 0)
+        account = self.account_home()
+        self.assertEqual(
+            (account / "sessions" / "2026" / "09" / "06" / shared.name).stat().st_ino,
+            shared.stat().st_ino,
+        )
+
+    def test_a_cutoff_holds_back_transcripts_recorded_before_it(self):
+        self.config["sessionSharing"]["since"] = "2026-09-06T00:00:00Z"
+        self.store.save(self.config)
+        backlog = self.write_rollout(
+            self.codex_home, "2026/07/01", "rollout-2026-07-01T10-00-00-old.jsonl"
+        )
+        recent = self.write_rollout(
+            self.codex_home, "2026/09/07", "rollout-2026-09-07T10-00-00-new.jsonl"
+        )
+
+        account = self.account_home()
+        self.store.environment("codex", "2", self.config)
+
+        self.assertFalse((account / "sessions" / "2026" / "07").exists())
+        self.assertTrue(
+            (account / "sessions" / "2026" / "09" / "07" / recent.name).exists()
+        )
+        self.assertTrue(backlog.exists())
+
+    def test_merging_unifies_the_backlog_and_retires_the_cutoff(self):
+        self.config["sessionSharing"]["since"] = "2026-09-06T00:00:00Z"
+        self.store.save(self.config)
+        backlog = self.write_rollout(
+            self.codex_home, "2026/07/01", "rollout-2026-07-01T10-00-00-old.jsonl"
+        )
+        account = self.account_home()
+        own = self.write_rollout(
+            account, "2026/06/01", "rollout-2026-06-01T10-00-00-mine.jsonl"
+        )
+
+        reports = self.store.merge_sessions(self.config)
+
+        self.assertEqual(sum(r["pulled"] + r["pushed"] for r in reports), 2)
+        self.assertTrue(
+            (account / "sessions" / "2026" / "07" / "01" / backlog.name).exists()
+        )
+        self.assertTrue(
+            (self.codex_home / "sessions" / "2026" / "06" / "01" / own.name).exists()
+        )
+        self.assertIsNone(self.store.load()["sessionSharing"]["since"])
+
+    def test_a_dry_run_merge_writes_nothing(self):
+        self.write_rollout(
+            self.codex_home, "2026/09/06", "rollout-2026-09-06T10-00-00-aaa.jsonl"
+        )
+        account = self.account_home()
+
+        reports = self.store.merge_sessions(self.config, dry_run=True)
+
+        self.assertEqual(sum(r["pulled"] + r["pushed"] for r in reports), 1)
+        self.assertFalse((account / "sessions" / "2026").exists())
+
+    def test_an_isolated_account_keeps_its_transcripts_to_itself(self):
+        self.store.set_session_sharing(self.config, "isolated", "2")
+        shared = self.write_rollout(
+            self.codex_home, "2026/09/06", "rollout-2026-09-06T10-00-00-aaa.jsonl"
+        )
+        account = self.account_home()
+        own = self.write_rollout(
+            account, "2026/09/06", "rollout-2026-09-06T11-00-00-bbb.jsonl"
+        )
+
+        self.store.environment("codex", "2", self.config)
+
+        self.assertFalse(
+            (account / "sessions" / "2026" / "09" / "06" / shared.name).exists()
+        )
+        self.assertFalse(
+            (self.codex_home / "sessions" / "2026" / "09" / "06" / own.name).exists()
+        )
+
+    def test_sharing_never_moves_a_credential_or_a_local_index(self):
+        (self.codex_home / "auth.json").write_text("shared-account", encoding="utf-8")
+        (self.codex_home / "installation_id").write_text("main", encoding="utf-8")
+        (self.codex_home / "state_5.sqlite").write_text("index", encoding="utf-8")
+        (self.codex_home / "version.json").write_text("{}", encoding="utf-8")
+        account = self.account_home()
+        (account / "auth.json").write_text("second-account", encoding="utf-8")
+
+        self.store.environment("codex", "2", self.config)
+
+        self.assertEqual(
+            (account / "auth.json").read_text(encoding="utf-8"), "second-account"
+        )
+        for name in ("installation_id", "state_5.sqlite", "version.json"):
+            self.assertFalse((account / name).exists(), name)
+
+    def test_configuration_follows_the_store_and_backs_up_what_it_replaces(self):
+        (self.codex_home / "config.toml").write_text('model = "new"\n', encoding="utf-8")
+        (self.codex_home / "explabs.config.toml").write_text("x = 1\n", encoding="utf-8")
+        account = self.account_home()
+        (account / "config.toml").write_text('model = "old"\n', encoding="utf-8")
+
+        self.store.environment("codex", "2", self.config)
+
+        self.assertEqual(
+            (account / "config.toml").read_text(encoding="utf-8"), 'model = "new"\n'
+        )
+        self.assertEqual(
+            (account / "explabs.config.toml").read_text(encoding="utf-8"), "x = 1\n"
+        )
+        backups = list(account.glob("config.toml.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), 'model = "old"\n')
+
+    def test_configuration_breaks_an_existing_hard_link(self):
+        source = self.codex_home / "config.toml"
+        source.write_text('model = "shared"\n', encoding="utf-8")
+        account = self.account_home()
+        destination = account / "config.toml"
+        os.link(source, destination)
+
+        self.store._copy_shared_config(account, self.codex_home)
+
+        self.assertNotEqual(destination.stat().st_ino, source.stat().st_ino)
+        self.assertEqual(
+            destination.read_text(encoding="utf-8"), source.read_text(encoding="utf-8")
+        )
+
+    def test_configuration_backups_do_not_overwrite_each_other(self):
+        source = self.codex_home / "config.toml"
+        source.write_text('model = "first"\n', encoding="utf-8")
+        account = self.account_home()
+        destination = account / "config.toml"
+        destination.write_text('model = "original"\n', encoding="utf-8")
+
+        with patch("super_agent.config.file_timestamp", return_value="fixed"):
+            self.store._copy_shared_config(account, self.codex_home)
+            source.write_text('model = "second"\n', encoding="utf-8")
+            self.store._copy_shared_config(account, self.codex_home)
+
+        backups = sorted(account.glob("config.toml.bak-*"))
+        self.assertEqual(len(backups), 2)
+        self.assertEqual(
+            {backup.read_text(encoding="utf-8") for backup in backups},
+            {'model = "original"\n', 'model = "first"\n'},
+        )
+        self.assertEqual(destination.read_text(encoding="utf-8"), 'model = "second"\n')
+
+    def test_configuration_replacement_failure_preserves_the_current_file(self):
+        (self.codex_home / "config.toml").write_text(
+            'model = "new"\n', encoding="utf-8"
+        )
+        account = self.account_home()
+        destination = account / "config.toml"
+        destination.write_text('model = "old"\n', encoding="utf-8")
+
+        with patch("super_agent.config.os.replace", side_effect=OSError("blocked")):
+            with self.assertRaisesRegex(ConfigError, "Cannot share Codex configuration"):
+                self.store._copy_shared_config(account, self.codex_home)
+
+        self.assertEqual(destination.read_text(encoding="utf-8"), 'model = "old"\n')
+        self.assertEqual(list(account.glob(".config.toml.*.tmp")), [])
+
+    def test_configuration_refuses_a_symlinked_destination(self):
+        (self.codex_home / "config.toml").write_text(
+            'model = "new"\n', encoding="utf-8"
+        )
+        account = self.account_home()
+        target = account / "local.toml"
+        target.write_text('model = "old"\n', encoding="utf-8")
+        (account / "config.toml").symlink_to(target)
+
+        with self.assertRaisesRegex(ConfigError, "unsafe account configuration"):
+            self.store._copy_shared_config(account, self.codex_home)
+
+        self.assertEqual(target.read_text(encoding="utf-8"), 'model = "old"\n')
+
+    def test_excluding_a_group_stops_it_following_the_store(self):
+        self.store.set_session_groups(self.config, ["config"], include=False)
+        (self.codex_home / "config.toml").write_text('model = "new"\n', encoding="utf-8")
+        account = self.account_home()
+
+        self.store.environment("codex", "2", self.config)
+
+        self.assertFalse((account / "config.toml").exists())
+
+    def test_prompt_history_becomes_one_shared_file(self):
+        history = self.codex_home / "history.jsonl"
+        history.write_text('{"prompt":"one"}\n', encoding="utf-8")
+        account = self.account_home()
+
+        self.store.environment("codex", "2", self.config)
+
+        self.assertEqual(
+            (account / "history.jsonl").stat().st_ino, history.stat().st_ino
+        )
+
+    def test_account_history_seeds_an_empty_shared_store(self):
+        account = self.account_home()
+        local = account / "history.jsonl"
+        local.write_text('{"prompt":"account"}\n', encoding="utf-8")
+
+        changed = self.store._link_shared_history(account, self.codex_home)
+
+        shared = self.codex_home / "history.jsonl"
+        self.assertEqual(changed, 1)
+        self.assertEqual(shared.stat().st_ino, local.stat().st_ino)
+
+    def test_a_rewritten_prompt_history_is_set_aside_not_discarded(self):
+        history = self.codex_home / "history.jsonl"
+        history.write_text('{"prompt":"shared"}\n', encoding="utf-8")
+        account = self.account_home()
+        (account / "history.jsonl").write_text('{"prompt":"local"}\n', encoding="utf-8")
+
+        self.store.environment("codex", "2", self.config)
+
+        backups = list(account.glob("history.jsonl.local-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            backups[0].read_text(encoding="utf-8"), '{"prompt":"local"}\n'
+        )
+        self.assertEqual(
+            (account / "history.jsonl").stat().st_ino, history.stat().st_ino
+        )
+
+    def test_history_link_failure_preserves_the_account_history(self):
+        history = self.codex_home / "history.jsonl"
+        history.write_text('{"prompt":"shared"}\n', encoding="utf-8")
+        account = self.account_home()
+        local = account / "history.jsonl"
+        local.write_text('{"prompt":"local"}\n', encoding="utf-8")
+
+        with patch("super_agent.config.os.link", side_effect=OSError("cross-device")):
+            with self.assertRaisesRegex(ConfigError, "same filesystem"):
+                self.store._link_shared_history(account, self.codex_home)
+
+        self.assertEqual(local.read_text(encoding="utf-8"), '{"prompt":"local"}\n')
+        self.assertEqual(list(account.glob("history.jsonl.local-*")), [])
+
+    def test_a_session_recorded_elsewhere_can_be_adopted_by_name(self):
+        self.store.set_session_sharing(self.config, "isolated", "2")
+        account = self.account_home()
+        own = self.write_rollout(
+            account, "2026/09/07", "rollout-2026-09-07T08-00-00-eeee.jsonl"
+        )
+
+        found = self.store.find_rollout(self.config, "eeee", skip=self.codex_home)
+        self.assertEqual(found, own)
+        adopted = self.store.adopt_rollout(self.codex_home, found)
+        self.assertEqual(adopted.stat().st_ino, own.stat().st_ino)
+        self.assertEqual(
+            adopted,
+            self.codex_home / "sessions" / "2026" / "09" / "07" / own.name,
+        )
+
+    def test_adopting_a_session_refuses_to_create_a_diverging_copy(self):
+        self.store.set_session_sharing(self.config, "isolated", "2")
+        account = self.account_home()
+        own = self.write_rollout(
+            account, "2026/09/07", "rollout-2026-09-07T08-00-00-eeee.jsonl"
+        )
+
+        with patch("super_agent.config.os.link", side_effect=OSError("cross-device")):
+            with self.assertRaisesRegex(ConfigError, "same filesystem"):
+                self.store.adopt_rollout(self.codex_home, own)
+
+        destination = (
+            self.codex_home / "sessions" / "2026" / "09" / "07" / own.name
+        )
+        self.assertFalse(destination.exists())
+
+    def test_adopting_a_session_refuses_a_symlinked_transcript(self):
+        account = self.account_home()
+        target = self.write_rollout(
+            account, "2026/09/07", "rollout-2026-09-07T08-00-00-target.jsonl"
+        )
+        linked = target.with_name("rollout-2026-09-07T08-00-00-linked.jsonl")
+        linked.symlink_to(target)
+
+        with self.assertRaisesRegex(ConfigError, "unsafe Codex transcript"):
+            self.store.adopt_rollout(self.codex_home, linked)
+
+    def test_sharing_keys_are_added_without_bumping_the_schema_version(self):
+        legacy = default_config()
+        legacy.pop("sessionSharing")
+        self.store.save_raw = None
+        path = self.store.config_path
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        config = self.store.load()
+
+        self.assertEqual(config["version"], 2)
+        self.assertEqual(config["sessionSharing"]["default"], "shared")
+        self.assertIsNotNone(config["sessionSharing"]["since"])
+
+    def test_an_existing_configuration_is_not_rewritten_on_every_load(self):
+        first = self.store.config_path.stat().st_mtime_ns
+        self.store.load()
+        self.assertEqual(self.store.config_path.stat().st_mtime_ns, first)
+
+    def test_unknown_sharing_groups_and_modes_are_refused(self):
+        with self.assertRaisesRegex(ConfigError, "Unknown session sharing group"):
+            self.store.set_session_groups(self.config, ["secrets"])
+        with self.assertRaisesRegex(ConfigError, "Session sharing must be one of"):
+            self.store.set_session_sharing(self.config, "sometimes")

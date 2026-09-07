@@ -1,3 +1,5 @@
+import datetime
+import filecmp
 import json
 import os
 import re
@@ -21,6 +23,23 @@ PROVIDER_WIRE_APIS = ("responses", "chat")
 PROVIDER_REASONING = ("minimal", "low", "medium", "high", "xhigh")
 PROVIDER_ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 PROVIDER_URL_PATTERN = re.compile(r"^https?://[^\s]+$")
+SHARING_MODES = ("shared", "isolated")
+DEFAULT_SHARING_MODE = "shared"
+SESSION_LINK_DIRECTORIES = ("sessions", "archived_sessions", "attachments")
+SESSION_HISTORY_FILE = "history.jsonl"
+SHARED_CONFIG_FILES = ("config.toml",)
+SHARED_CONFIG_SUFFIX = ".config.toml"
+SHARING_GROUPS = (
+    "sessions",
+    "archived_sessions",
+    "attachments",
+    "history",
+    "config",
+)
+DEFAULT_SHARING_GROUPS = list(SHARING_GROUPS)
+ROLLOUT_NAME_PATTERN = re.compile(
+    r"^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-"
+)
 
 
 class ConfigError(RuntimeError):
@@ -66,6 +85,61 @@ def ensure_private_directory(path, parents=True):
     return path
 
 
+def ensure_session_directory(path):
+    """Create a transcript directory without re-permissioning an existing one.
+
+    `ensure_private_directory` always tightens a directory to 0700. That is right
+    for Super Codex state, but the shared store is the user's own `~/.codex`,
+    whose directories Codex creates as 0755; silently tightening them on every
+    launch would be a surprising side effect of turning sharing on. A directory
+    this creates is still private, and an existing one is only checked, never
+    changed.
+    """
+    path = Path(path)
+    try:
+        path.mkdir(parents=False, exist_ok=True, mode=0o700)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise ConfigError(f"Cannot create transcript directory {path}: {exc}") from exc
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISDIR(details.st_mode):
+            raise ConfigError(f"Refusing non-directory transcript path: {path}")
+        if details.st_uid != os.getuid():
+            raise ConfigError(f"Transcript path is not owned by this user: {path}")
+    finally:
+        os.close(descriptor)
+    return path
+
+
+def rollout_recorded_at(name):
+    """Return the naive local time encoded in a rollout filename, or None.
+
+    Codex names transcripts `rollout-<local ISO time>-<uuid>.jsonl`, so a backlog
+    cutoff can be applied from the filename alone, without reading a transcript
+    or trusting its mtime.
+    """
+    match = ROLLOUT_NAME_PATTERN.match(name)
+    if not match:
+        return None
+    try:
+        return datetime.datetime(*(int(part) for part in match.groups()))
+    except ValueError:
+        return None
+
+
+def local_cutoff(since):
+    """Convert a stored UTC cutoff into the naive local time rollouts are named in."""
+    if not since:
+        return None
+    try:
+        parsed = datetime.datetime.strptime(since, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return parsed.replace(tzinfo=datetime.timezone.utc).astimezone().replace(tzinfo=None)
+
+
 def default_config():
     return {
         "version": 2,
@@ -84,7 +158,53 @@ def default_config():
         "providers": {},
         "providerDefaults": {"codex": DEFAULT_PROVIDER},
         "providerBindings": {},
+        "sessionSharing": default_session_sharing(),
         "workspaces": {},
+    }
+
+
+def utc_timestamp():
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        .replace(microsecond=0)
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+
+def file_timestamp():
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def backup_file(path, label):
+    base = path.parent / f"{path.name}.{label}-{file_timestamp()}"
+    candidate = base
+    counter = 2
+    while True:
+        try:
+            os.link(os.fspath(path), os.fspath(candidate), follow_symlinks=False)
+            os.chmod(os.fspath(candidate), 0o600)
+            return candidate
+        except FileExistsError:
+            candidate = Path(f"{base}.{counter}")
+            counter += 1
+        except OSError as exc:
+            raise ConfigError(f"Cannot preserve {path}: {exc}") from exc
+
+
+def files_match(left, right):
+    """Report whether two files already hold the same bytes."""
+    try:
+        return filecmp.cmp(os.fspath(left), os.fspath(right), shallow=False)
+    except FileNotFoundError:
+        return False
+
+
+def default_session_sharing():
+    return {
+        "default": DEFAULT_SHARING_MODE,
+        "profiles": {},
+        "include": list(DEFAULT_SHARING_GROUPS),
+        "since": None,
     }
 
 
@@ -160,6 +280,7 @@ class Store:
             if descriptor is not None:
                 os.close(descriptor)
         migrated = self._migrate_providers(config)
+        migrated = self._migrate_session_sharing(config) or migrated
         self.validate(config)
         if migrated:
             self.save(config)
@@ -216,6 +337,28 @@ class Store:
             config["providerBindings"] = {}
             changed = True
         return changed
+
+    @staticmethod
+    def _migrate_session_sharing(config):
+        """Add the session-sharing keys to a configuration written before them.
+
+        Like providers, sharing is additive to schema version 2, so an older file
+        is filled in rather than rejected. An existing installation already holds
+        transcripts in each account home, and silently unifying that backlog on
+        the next launch would be a surprise, so the migration stamps `since` with
+        the current time: sessions recorded from now on are shared, and the
+        backlog waits for an explicit `sc sessions merge`. A configuration
+        created from scratch has no backlog and so carries no cutoff.
+        """
+        if not isinstance(config, dict):
+            return False
+        sharing = config.get("sessionSharing")
+        if isinstance(sharing, dict):
+            return False
+        sharing = default_session_sharing()
+        sharing["since"] = utc_timestamp()
+        config["sessionSharing"] = sharing
+        return True
 
     def validate(self, config):
         if not isinstance(config, dict) or config.get("version") != 2:
@@ -316,6 +459,41 @@ class Store:
             raise ConfigError("Config providerBindings must be an object")
         for provider in provider_bindings.values():
             self.require_provider(config, provider)
+        self.validate_session_sharing(config)
+
+    def validate_session_sharing(self, config):
+        sharing = config.get("sessionSharing")
+        if not isinstance(sharing, dict):
+            raise ConfigError("Config sessionSharing must be an object")
+        if sharing.get("default") not in SHARING_MODES:
+            raise ConfigError(
+                "Config sessionSharing.default must be one of "
+                + ", ".join(SHARING_MODES)
+            )
+        overrides = sharing.get("profiles")
+        if not isinstance(overrides, dict):
+            raise ConfigError("Config sessionSharing.profiles must be an object")
+        for profile, mode in overrides.items():
+            if mode not in SHARING_MODES:
+                raise ConfigError(
+                    f"Session sharing for profile {profile} must be one of "
+                    + ", ".join(SHARING_MODES)
+                )
+            self.require_profile(config, "codex", profile)
+        include = sharing.get("include")
+        if not isinstance(include, list):
+            raise ConfigError("Config sessionSharing.include must be a list")
+        for group in include:
+            if group not in SHARING_GROUPS:
+                raise ConfigError(
+                    f"Unknown session sharing group: {group}. Available groups: "
+                    + ", ".join(SHARING_GROUPS)
+                )
+        if len(set(include)) != len(include):
+            raise ConfigError("Config sessionSharing.include repeats a group")
+        since = sharing.get("since")
+        if since is not None and not isinstance(since, str):
+            raise ConfigError("Config sessionSharing.since must be a string or null")
 
     @staticmethod
     def validate_provider(name, provider):
@@ -573,43 +751,128 @@ class Store:
                 f"Cannot replace Codex session link {destination}: {exc}"
             ) from exc
 
-    def _link_session_tree(self, source, destination):
-        """Hard link every transcript under `source` into `destination`."""
+    def _link_session_tree(self, source, destination, cutoff=None, dry_run=False, ensure=None):
+        """Hard link every transcript under `source` into `destination`.
+
+        Codex canonicalizes rollout paths and refuses any that resolve outside
+        `CODEX_HOME`, so a shared transcript has to be a real directory entry in
+        every home that offers it. A hard link is the one mechanism that
+        satisfies both: one inode, a name inside each home, no copy on disk.
+
+        `cutoff` skips rollouts recorded before a backlog boundary, read from the
+        filename alone. It applies only to files Codex timestamps that way; an
+        attachment or a transcript with an unrecognised name is always linked
+        rather than silently dropped. Destination directories are created only
+        once something is actually linked into them, so a filtered day leaves no
+        empty shell behind. Returns the number of files linked, or that would be
+        linked under `dry_run`.
+        """
         source = absolute_path(source)
+        destination = Path(destination)
         try:
             source_status = source.lstat()
         except FileNotFoundError:
-            return
+            return 0
         except OSError as exc:
             raise ConfigError(f"Cannot inspect Codex session path {source}: {exc}") from exc
         if stat.S_ISLNK(source_status.st_mode) or not stat.S_ISDIR(source_status.st_mode):
             raise ConfigError(f"Refusing unsafe Codex session path: {source}")
         if source_status.st_uid != os.getuid():
             raise ConfigError(f"Codex session path is not owned by this user: {source}")
-        ensure_private_directory(destination, parents=False)
         try:
             with os.scandir(source) as scan:
                 entries = sorted(scan, key=lambda entry: entry.name)
         except OSError as exc:
             raise ConfigError(f"Cannot read Codex session path {source}: {exc}") from exc
+
+        state = {"ready": dry_run}
+
+        def ensure_destination():
+            if state["ready"]:
+                return destination
+            if ensure is not None:
+                ensure()
+            ensure_session_directory(destination)
+            state["ready"] = True
+            return destination
+
+        linked = 0
         for entry in entries:
             if entry.is_symlink():
                 continue
             child = destination / entry.name
             if entry.is_dir():
-                self._link_session_tree(source / entry.name, child)
-            elif entry.is_file():
-                try:
-                    os.link(entry.path, child)
-                except FileExistsError:
+                linked += self._link_session_tree(
+                    source / entry.name, child, cutoff, dry_run, ensure_destination
+                )
+                continue
+            if not entry.is_file() or not self._within_cutoff(entry.name, cutoff):
+                continue
+            try:
+                source_file_status = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect shared Codex asset {entry.path}: {exc}") from exc
+            try:
+                destination_status = child.lstat()
+            except FileNotFoundError:
+                destination_status = None
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect shared Codex asset {child}: {exc}") from exc
+            if (
+                not stat.S_ISREG(source_file_status.st_mode)
+                or source_file_status.st_uid != os.getuid()
+            ):
+                raise ConfigError(f"Refusing unsafe shared Codex asset: {entry.path}")
+            if destination_status is not None:
+                if (
+                    not stat.S_ISREG(destination_status.st_mode)
+                    or destination_status.st_uid != os.getuid()
+                ):
+                    raise ConfigError(f"Refusing unsafe shared Codex asset: {child}")
+                if (
+                    destination_status.st_dev == source_file_status.st_dev
+                    and destination_status.st_ino == source_file_status.st_ino
+                ):
                     continue
-                except OSError:
-                    try:
-                        shutil.copy2(entry.path, child)
-                    except OSError as exc:
-                        raise ConfigError(
-                            f"Cannot migrate Codex transcript {entry.path}: {exc}"
-                        ) from exc
+                raise ConfigError(f"Refusing conflicting shared Codex asset: {child}")
+            if dry_run:
+                linked += 1
+                continue
+            ensure_destination()
+            try:
+                os.link(entry.path, os.fspath(child), follow_symlinks=False)
+            except FileExistsError as exc:
+                try:
+                    raced_status = child.lstat()
+                except OSError as inspect_exc:
+                    raise ConfigError(
+                        f"Cannot inspect shared Codex asset {child}: {inspect_exc}"
+                    ) from inspect_exc
+                if not (
+                    stat.S_ISREG(raced_status.st_mode)
+                    and raced_status.st_dev == source_file_status.st_dev
+                    and raced_status.st_ino == source_file_status.st_ino
+                ):
+                    raise ConfigError(
+                        f"Refusing conflicting shared Codex asset: {child}"
+                    ) from exc
+                continue
+            except OSError as exc:
+                raise ConfigError(
+                    f"Cannot hard-link shared Codex asset {entry.path} to {child}; "
+                    f"the homes must be on the same filesystem: {exc}"
+                ) from exc
+            linked += 1
+        return linked
+
+    @staticmethod
+    def _within_cutoff(name, cutoff):
+        if cutoff is None:
+            return True
+        recorded = rollout_recorded_at(name)
+        return recorded is None or recorded >= cutoff
 
     def _seed_replacement_sessions(self, agent, profile, data, candidate, shared_home):
         """Carry an isolated profile's own transcripts into its replacement home."""
@@ -624,6 +887,476 @@ class Store:
         for name in CODEX_SESSION_DIRECTORIES:
             self._link_session_tree(previous / name, candidate / name)
 
+    def session_sharing(self, config):
+        sharing = config.get("sessionSharing")
+        return sharing if isinstance(sharing, dict) else default_session_sharing()
+
+    def session_sharing_mode(self, config, profile):
+        """Return `shared` or `isolated` for one Codex profile."""
+        sharing = self.session_sharing(config)
+        profile = self.normalize_profile("codex", profile)
+        override = sharing.get("profiles", {}).get(profile)
+        if override in SHARING_MODES:
+            return override
+        default = sharing.get("default")
+        return default if default in SHARING_MODES else DEFAULT_SHARING_MODE
+
+    def session_sharing_groups(self, config):
+        include = self.session_sharing(config).get("include")
+        if not isinstance(include, list):
+            return list(DEFAULT_SHARING_GROUPS)
+        return [group for group in SHARING_GROUPS if group in include]
+
+    def _prepare_codex_home(self, isolated_home, shared_home, config=None, profile=None):
+        """Prepare an isolated Codex home, unifying it with the store when shared."""
+        migrated = self._prepare_codex_sessions(isolated_home, shared_home)
+        if config is not None and profile is not None:
+            if self.session_sharing_mode(config, profile) == "shared":
+                self.sync_codex_home(isolated_home, shared_home, config)
+        return migrated
+
+    def sync_codex_home(self, home, shared_home, config, dry_run=False, ignore_cutoff=False):
+        """Reconcile one isolated Codex home with the shared store.
+
+        Transcripts move in both directions so a session is resumable from any
+        account and from a bare `codex`; configuration only ever moves out of the
+        store, because Codex rewrites `config.toml` whenever a setting changes and
+        a hard link would silently break. `auth.json` is never read, copied, or
+        linked: it is what keeps the accounts separate.
+        """
+        home = absolute_path(home)
+        shared_home = absolute_path(shared_home)
+        report = {"pulled": 0, "pushed": 0, "config": []}
+        if home == shared_home:
+            return report
+        groups = self.session_sharing_groups(config)
+        cutoff = None if ignore_cutoff else local_cutoff(
+            self.session_sharing(config).get("since")
+        )
+        for name in SESSION_LINK_DIRECTORIES:
+            if name not in groups:
+                continue
+            report["pulled"] += self._link_session_tree(
+                shared_home / name, home / name, cutoff, dry_run
+            )
+            report["pushed"] += self._link_session_tree(
+                home / name, shared_home / name, cutoff, dry_run
+            )
+        if "history" in groups:
+            report["pulled"] += self._link_shared_history(home, shared_home, dry_run)
+        if "config" in groups:
+            report["config"] = self._copy_shared_config(home, shared_home, dry_run)
+        return report
+
+    def _link_shared_history(self, home, shared_home, dry_run=False):
+        """Give the home the store's prompt history as one shared inode.
+
+        Codex appends to `history.jsonl`, so a hard link makes every account share
+        one history. If the file was rewritten somewhere the inodes diverge; the
+        home's copy is set aside rather than discarded, and the store's is linked
+        back in. Contents are never read.
+        """
+        source = shared_home / SESSION_HISTORY_FILE
+        destination = home / SESSION_HISTORY_FILE
+        try:
+            destination_status = destination.lstat()
+        except FileNotFoundError:
+            destination_status = None
+        except OSError as exc:
+            raise ConfigError(f"Cannot inspect {destination}: {exc}") from exc
+        if destination_status is not None and (
+            not stat.S_ISREG(destination_status.st_mode)
+            or destination_status.st_uid != os.getuid()
+        ):
+            raise ConfigError(f"Refusing unsafe history path: {destination}")
+        try:
+            source_status = source.lstat()
+        except FileNotFoundError:
+            if destination_status is None:
+                return 0
+            if dry_run:
+                return 1
+            try:
+                os.link(
+                    os.fspath(destination),
+                    os.fspath(source),
+                    follow_symlinks=False,
+                )
+                return 1
+            except FileExistsError:
+                try:
+                    source_status = source.lstat()
+                except OSError as exc:
+                    raise ConfigError(f"Cannot inspect {source}: {exc}") from exc
+            except OSError as exc:
+                raise ConfigError(
+                    "Cannot seed shared prompt history; the homes must be on the "
+                    f"same filesystem: {exc}"
+                ) from exc
+        except OSError as exc:
+            raise ConfigError(f"Cannot inspect {source}: {exc}") from exc
+        if (
+            not stat.S_ISREG(source_status.st_mode)
+            or source_status.st_uid != os.getuid()
+        ):
+            raise ConfigError(f"Refusing unsafe shared prompt history: {source}")
+        if destination_status is not None and (
+            destination_status.st_dev == source_status.st_dev
+            and destination_status.st_ino == source_status.st_ino
+        ):
+            return 0
+        if dry_run:
+            return 1
+        staging_directory = Path(
+            tempfile.mkdtemp(prefix=f".{SESSION_HISTORY_FILE}.", dir=os.fspath(home))
+        )
+        staging = staging_directory / SESSION_HISTORY_FILE
+        try:
+            os.link(os.fspath(source), os.fspath(staging), follow_symlinks=False)
+        except OSError as exc:
+            try:
+                staging_directory.rmdir()
+            except OSError:
+                pass
+            raise ConfigError(
+                "Cannot hard-link shared prompt history; the homes must be on the "
+                f"same filesystem: {exc}"
+            ) from exc
+        try:
+            if destination_status is not None:
+                backup_file(destination, "local")
+            os.replace(os.fspath(staging), os.fspath(destination))
+        except OSError as exc:
+            raise ConfigError(f"Cannot replace shared prompt history: {exc}") from exc
+        finally:
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+            try:
+                staging_directory.rmdir()
+            except OSError:
+                pass
+        return 1
+
+    def _shared_config_names(self, shared_home):
+        names = []
+        try:
+            with os.scandir(shared_home) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name)
+        except OSError:
+            return names
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            if entry.name in SHARED_CONFIG_FILES or entry.name.endswith(
+                SHARED_CONFIG_SUFFIX
+            ):
+                names.append(entry.name)
+        return names
+
+    def _copy_shared_config(self, home, shared_home, dry_run=False):
+        """Copy the store's Codex configuration into an isolated home.
+
+        Only `config.toml` and the sibling `*.config.toml` provider profiles are
+        copied, by name. Nothing else in the home is touched, and credentials in
+        particular are neither read nor written.
+        """
+        copied = []
+        for name in self._shared_config_names(shared_home):
+            source = shared_home / name
+            destination = home / name
+            try:
+                source_status = source.lstat()
+                destination_status = destination.lstat()
+            except FileNotFoundError as exc:
+                if exc.filename == os.fspath(source):
+                    continue
+                destination_status = None
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect shared configuration: {exc}") from exc
+            if not stat.S_ISREG(source_status.st_mode) or source_status.st_uid != os.getuid():
+                raise ConfigError(f"Refusing unsafe shared configuration: {source}")
+            if destination_status is not None:
+                if (
+                    not stat.S_ISREG(destination_status.st_mode)
+                    or destination_status.st_uid != os.getuid()
+                ):
+                    raise ConfigError(f"Refusing unsafe account configuration: {destination}")
+                try:
+                    same_file = (
+                        destination_status.st_dev == source_status.st_dev
+                        and destination_status.st_ino == source_status.st_ino
+                    )
+                    if not same_file and files_match(source, destination):
+                        continue
+                except OSError as exc:
+                    raise ConfigError(f"Cannot compare {destination}: {exc}") from exc
+            copied.append(name)
+            if dry_run:
+                continue
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{name}.", suffix=".tmp", dir=os.fspath(home)
+            )
+            os.close(descriptor)
+            try:
+                shutil.copyfile(
+                    os.fspath(source), os.fspath(temporary), follow_symlinks=False
+                )
+                os.chmod(temporary, 0o600)
+                if destination_status is not None:
+                    backup_file(destination, "bak")
+                os.replace(temporary, os.fspath(destination))
+            except (OSError, ConfigError) as exc:
+                raise ConfigError(f"Cannot share Codex configuration: {exc}") from exc
+            finally:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+        return copied
+
+    def codex_homes(self, config, env=None):
+        """Describe every configured Codex account and where its transcripts live.
+
+        A profile whose account isolation is `shared` already runs in the store,
+        so it needs no reconciliation; only an isolated home has a second copy of
+        the transcript tree to keep in step.
+        """
+        shared_home = self.shared_codex_home(env)
+        rows = []
+        for name in self.ordered_profile_names(config, "codex"):
+            data = config["profiles"]["codex"][name]
+            isolated = data.get("isolation") == "isolated"
+            home = (
+                self._provider_home("codex", data.get("providerHome", name))
+                if isolated
+                else shared_home
+            )
+            rows.append(
+                {
+                    "profile": name,
+                    "label": data.get("label", name),
+                    "home": home,
+                    "isolated": isolated,
+                    "mode": self.session_sharing_mode(config, name)
+                    if isolated
+                    else "shared",
+                }
+            )
+        return rows
+
+    def count_rollouts(self, home):
+        total = 0
+        for name in ("sessions", "archived_sessions"):
+            for _, _, files in os.walk(os.fspath(Path(home) / name)):
+                total += sum(1 for entry in files if entry.startswith("rollout-"))
+        return total
+
+    def sessions_status(self, config, env=None):
+        """Report, per account, how far its transcripts are from the store."""
+        shared_home = self.shared_codex_home(env)
+        rows = []
+        for row in self.codex_homes(config, env):
+            entry = dict(row)
+            entry["store"] = shared_home
+            entry["rollouts"] = self.count_rollouts(row["home"])
+            entry["pending"] = 0
+            if row["isolated"] and row["mode"] == "shared":
+                report = self.sync_codex_home(
+                    row["home"], shared_home, config, dry_run=True, ignore_cutoff=True
+                )
+                entry["pending"] = report["pulled"] + report["pushed"]
+            rows.append(entry)
+        return rows
+
+    def reconcile_sessions(
+        self, config, profile=None, dry_run=False, ignore_cutoff=False, env=None
+    ):
+        """Reconcile shared accounts with the store and report what moved."""
+        shared_home = self.shared_codex_home(env)
+        targets = self.codex_homes(config, env)
+        if profile:
+            profile = self.normalize_profile("codex", profile)
+            self.require_profile(config, "codex", profile)
+            targets = [row for row in targets if row["profile"] == profile]
+        reports = []
+        for row in targets:
+            if not row["isolated"] or row["mode"] != "shared":
+                continue
+            report = self.sync_codex_home(
+                row["home"],
+                shared_home,
+                config,
+                dry_run=dry_run,
+                ignore_cutoff=ignore_cutoff,
+            )
+            report["profile"] = row["profile"]
+            reports.append(report)
+        return reports
+
+    def merge_sessions(self, config, profile=None, dry_run=False, env=None):
+        """Unify the transcript backlog the sharing cutoff was holding back.
+
+        Merging is what retires the cutoff: once the backlog is unified there is
+        nothing left for it to hold back, so a full merge clears it.
+        """
+        reports = self.reconcile_sessions(
+            config, profile=profile, dry_run=dry_run, ignore_cutoff=True, env=env
+        )
+        if not dry_run and not profile:
+            sharing = self.session_sharing(config)
+            if sharing.get("since") is not None:
+                sharing["since"] = None
+                config["sessionSharing"] = sharing
+                self.save(config)
+        return reports
+
+    def set_session_sharing(self, config, mode, profile=None):
+        """Turn transcript sharing on or off, globally or for one account."""
+        if mode not in SHARING_MODES:
+            raise ConfigError(
+                "Session sharing must be one of " + ", ".join(SHARING_MODES)
+            )
+        sharing = self.session_sharing(config)
+        if profile:
+            profile = self.normalize_profile("codex", profile)
+            self.require_profile(config, "codex", profile)
+            overrides = dict(sharing.get("profiles", {}))
+            if mode == sharing.get("default"):
+                overrides.pop(profile, None)
+            else:
+                overrides[profile] = mode
+            sharing["profiles"] = overrides
+        else:
+            sharing["default"] = mode
+            sharing["profiles"] = {}
+        config["sessionSharing"] = sharing
+        self.save(config)
+        return sharing
+
+    def set_session_groups(self, config, groups, include=True):
+        """Add or remove the asset groups that follow the store."""
+        for group in groups:
+            if group not in SHARING_GROUPS:
+                raise ConfigError(
+                    f"Unknown session sharing group: {group}. Available groups: "
+                    + ", ".join(SHARING_GROUPS)
+                )
+        sharing = self.session_sharing(config)
+        selected = set(self.session_sharing_groups(config))
+        if include:
+            selected.update(groups)
+        else:
+            selected.difference_update(groups)
+        sharing["include"] = [group for group in SHARING_GROUPS if group in selected]
+        config["sessionSharing"] = sharing
+        self.save(config)
+        return sharing["include"]
+
+    @staticmethod
+    def find_rollout_in(home, session):
+        """Locate a session id under one Codex home.
+
+        Only transcript filenames are inspected; no transcript is ever opened.
+        """
+        needle = (session or "").strip().lower()
+        if not needle:
+            return None
+        for name in ("sessions", "archived_sessions"):
+            root = os.fspath(Path(home) / name)
+            for directory, _, files in os.walk(root):
+                for entry in files:
+                    if not entry.startswith("rollout-") or needle not in entry.lower():
+                        continue
+                    candidate = Path(directory) / entry
+                    try:
+                        details = candidate.lstat()
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(details.st_mode) and details.st_uid == os.getuid():
+                        return candidate
+        return None
+
+    def find_rollout(self, config, session, env=None, skip=None):
+        """Locate a session id in any configured Codex home."""
+        skip = absolute_path(skip) if skip else None
+        for row in self.codex_homes(config, env):
+            if skip is not None and absolute_path(row["home"]) == skip:
+                continue
+            found = self.find_rollout_in(row["home"], session)
+            if found:
+                return found
+        return None
+
+    def adopt_rollout(self, home, rollout):
+        """Hard link one transcript into the home that is about to run.
+
+        Codex refuses a rollout that resolves outside `CODEX_HOME`, so resuming a
+        session recorded in another account means giving this home its own name
+        for that inode first. Returns the path the home can now resume, or None
+        when the transcript does not sit under a recognised session directory.
+        """
+        rollout = absolute_path(rollout)
+        home = absolute_path(home)
+        try:
+            source_status = rollout.lstat()
+        except OSError as exc:
+            raise ConfigError(f"Cannot inspect Codex transcript {rollout}: {exc}") from exc
+        if not stat.S_ISREG(source_status.st_mode) or source_status.st_uid != os.getuid():
+            raise ConfigError(f"Refusing unsafe Codex transcript: {rollout}")
+        for parent in rollout.parents:
+            if parent.name not in ("sessions", "archived_sessions"):
+                continue
+            relative = rollout.relative_to(parent)
+            destination = home / parent.name / relative
+            try:
+                destination_status = destination.lstat()
+            except FileNotFoundError:
+                destination_status = None
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect Codex transcript {destination}: {exc}") from exc
+            if destination_status is not None:
+                if (
+                    stat.S_ISREG(destination_status.st_mode)
+                    and destination_status.st_uid == os.getuid()
+                    and destination_status.st_dev == source_status.st_dev
+                    and destination_status.st_ino == source_status.st_ino
+                ):
+                    return destination
+                raise ConfigError(f"Refusing conflicting Codex transcript: {destination}")
+            current = ensure_session_directory(home / parent.name)
+            for part in relative.parts[:-1]:
+                current = ensure_session_directory(current / part)
+            try:
+                os.link(
+                    os.fspath(rollout),
+                    os.fspath(destination),
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                try:
+                    raced_status = destination.lstat()
+                except OSError as inspect_exc:
+                    raise ConfigError(
+                        f"Cannot inspect Codex transcript {destination}: {inspect_exc}"
+                    ) from inspect_exc
+                if not (
+                    stat.S_ISREG(raced_status.st_mode)
+                    and raced_status.st_dev == source_status.st_dev
+                    and raced_status.st_ino == source_status.st_ino
+                ):
+                    raise ConfigError(
+                        f"Refusing conflicting Codex transcript: {destination}"
+                    ) from exc
+            except OSError as exc:
+                raise ConfigError(
+                    f"Cannot hard-link {rollout.name} into this account; the homes "
+                    f"must be on the same filesystem: {exc}"
+                ) from exc
+            return destination
+        return None
+
     def environment(self, agent, profile, config=None):
         config = config or self.load()
         env = os.environ.copy()
@@ -631,7 +1364,7 @@ class Store:
         if home:
             if agent == "codex":
                 shared_home = self.shared_codex_home(env)
-                self._prepare_codex_sessions(home, shared_home)
+                self._prepare_codex_home(home, shared_home, config, profile)
                 env[SHARED_CODEX_HOME_ENV] = str(shared_home)
             else:
                 self._remember_shared_claude_home(env)

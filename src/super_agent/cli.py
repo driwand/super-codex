@@ -15,6 +15,8 @@ from .adapters import (
     auth_status,
     build_command,
     codex_live_status,
+    codex_set_thread_names,
+    codex_thread_names,
     command_display,
     exec_command,
     executable,
@@ -28,6 +30,7 @@ from .config import (
     DEFAULT_PROVIDER,
     PROVIDER_REASONING,
     PROVIDER_WIRE_APIS,
+    SHARING_GROUPS,
     ConfigError,
     Store,
     render_codex_provider_profile,
@@ -141,6 +144,42 @@ def parser():
         "show", help="Show the Codex profile a provider generates"
     )
     provider_show.add_argument("name")
+
+    sessions = commands.add_parser(
+        "sessions", help="Share Codex session history across accounts"
+    )
+    session_commands = sessions.add_subparsers(dest="sessions_command", required=True)
+    sessions_status = session_commands.add_parser(
+        "status", help="Show where each account's transcripts live"
+    )
+    sessions_status.add_argument("--json", action="store_true")
+    sessions_merge = session_commands.add_parser(
+        "merge", help="Unify the transcripts recorded before sharing was enabled"
+    )
+    sessions_merge.add_argument("--profile")
+    sessions_merge.add_argument(
+        "--dry-run", action="store_true", help="Report what would be unified"
+    )
+    sessions_share = session_commands.add_parser(
+        "share", help="Record new sessions into the shared store"
+    )
+    sessions_share.add_argument("--profile")
+    sessions_split = session_commands.add_parser(
+        "split", help="Keep an account's future sessions to itself"
+    )
+    sessions_split.add_argument("--profile")
+    sessions_sync = session_commands.add_parser(
+        "sync", help="Reconcile now instead of waiting for the next launch"
+    )
+    sessions_sync.add_argument("--profile")
+    sessions_include = session_commands.add_parser(
+        "include", help="Add asset groups that follow the shared store"
+    )
+    sessions_include.add_argument("groups", nargs="+", choices=SHARING_GROUPS)
+    sessions_exclude = session_commands.add_parser(
+        "exclude", help="Keep asset groups per account"
+    )
+    sessions_exclude.add_argument("groups", nargs="+", choices=SHARING_GROUPS)
 
     login = commands.add_parser("login", help="Run the provider's native login flow")
     add_selection_arguments(login)
@@ -524,6 +563,159 @@ def run_provider(store, config, cwd, args):
     raise ConfigError(f"Unsupported provider command: {args.provider_command}")
 
 
+def reconcile_session_names(store, config, profile=None, env=None):
+    if "sessions" not in store.session_sharing_groups(config):
+        return 0
+    base_env = dict(env or os.environ)
+    shared_home = store.shared_codex_home(base_env)
+    rows = store.codex_homes(config, base_env)
+    if profile:
+        profile = store.normalize_profile("codex", profile)
+        store.require_profile(config, "codex", profile)
+        rows = [row for row in rows if row["profile"] == profile]
+    targets = [
+        row for row in rows if row["isolated"] and row["mode"] == "shared"
+    ]
+    if not targets:
+        return 0
+    homes = [shared_home]
+    for row in targets:
+        if row["home"] not in homes:
+            homes.append(row["home"])
+    metadata = {}
+    environments = {}
+    for home in homes:
+        process_env = base_env.copy()
+        process_env["CODEX_HOME"] = str(home)
+        environments[home] = process_env
+        metadata[home] = codex_thread_names(process_env)
+    canonical = {}
+    for home in homes:
+        tie_breaker = 1 if home == shared_home else 0
+        for thread_id, thread in metadata[home].items():
+            name = thread.get("name")
+            if not name:
+                continue
+            rank = (thread.get("updatedAt", 0), tie_breaker)
+            if thread_id not in canonical or rank > canonical[thread_id][1]:
+                canonical[thread_id] = (name, rank)
+    applied = 0
+    for home in homes:
+        updates = {
+            thread_id: name
+            for thread_id, (name, _) in canonical.items()
+            if thread_id in metadata[home]
+            and metadata[home][thread_id].get("name") != name
+        }
+        applied += codex_set_thread_names(environments[home], updates)
+    return applied
+
+
+def run_sessions(store, config, args):
+    command = args.sessions_command
+    if command == "status":
+        rows = store.sessions_status(config)
+        sharing = store.session_sharing(config)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "default": sharing.get("default"),
+                        "include": store.session_sharing_groups(config),
+                        "since": sharing.get("since"),
+                        "store": str(rows[0]["store"]) if rows else None,
+                        "accounts": [
+                            {
+                                "profile": row["profile"],
+                                "label": row["label"],
+                                "mode": row["mode"],
+                                "home": str(row["home"]),
+                                "rollouts": row["rollouts"],
+                                "pending": row["pending"],
+                            }
+                            for row in rows
+                        ],
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if rows:
+            print(f"Store:    {rows[0]['store']}")
+        print(f"Sharing:  {sharing.get('default')} by default")
+        print(f"Includes: {', '.join(store.session_sharing_groups(config)) or 'nothing'}")
+        print()
+        pending = 0
+        for row in rows:
+            note = "store" if not row["isolated"] else row["mode"]
+            print(f"  {row['profile']:<6} {row['label']:<18} {note}")
+            detail = f"{row['rollouts']} transcripts"
+            if row["pending"]:
+                detail += f", {row['pending']} not unified"
+                pending += row["pending"]
+            print(f"         {detail}")
+        if pending:
+            print(
+                f"\n{pending} transcripts predate sharing. Preview with: "
+                "sc sessions merge --dry-run"
+            )
+        return 0
+    if command == "merge":
+        reports = store.merge_sessions(
+            config, profile=args.profile, dry_run=args.dry_run
+        )
+        total = sum(report["pulled"] + report["pushed"] for report in reports)
+        for report in reports:
+            moved = report["pulled"] + report["pushed"]
+            if moved:
+                print(f"  {report['profile']}: {moved} transcripts")
+        if args.dry_run:
+            print(f"Would unify {total} transcripts. Nothing was written.")
+            return 0
+        names = reconcile_session_names(store, config, args.profile)
+        configs = sum(len(report["config"]) for report in reports)
+        print(f"Unified {total} transcripts.")
+        print(f"Synchronized {names} session names and {configs} configuration files.")
+        if total:
+            print(
+                "They cost no extra disk space: each is one file with a name in "
+                "every account."
+            )
+        return 0
+    if command in ("share", "split"):
+        mode = "shared" if command == "share" else "isolated"
+        store.set_session_sharing(config, mode, args.profile)
+        scope = f"profile {args.profile}" if args.profile else "every account"
+        if mode == "shared":
+            print(f"Sharing session history for {scope}.")
+            print("Run sc sessions merge to unify transcripts recorded before now.")
+        else:
+            print(f"Keeping new sessions private to {scope}.")
+            print(
+                "Transcripts already shared stay visible; unlinking them would "
+                "risk removing the only copy."
+            )
+        return 0
+    if command == "sync":
+        reports = store.reconcile_sessions(config, profile=args.profile)
+        total = sum(report["pulled"] + report["pushed"] for report in reports)
+        names = reconcile_session_names(store, config, args.profile)
+        configs = sum(len(report["config"]) for report in reports)
+        print(
+            f"Reconciled {total} transcripts, synchronized {names} session names, "
+            f"and refreshed {configs} configuration files."
+        )
+        return 0
+    if command in ("include", "exclude"):
+        groups = store.set_session_groups(
+            config, args.groups, include=command == "include"
+        )
+        print(f"Shared with every account: {', '.join(groups) or 'nothing'}")
+        return 0
+    raise ConfigError(f"Unsupported sessions command: {command}")
+
+
 def run_bindings(config, agent_filter=None, json_output=False):
     rows = [
         {"workspace": workspace, "agent": binding["agent"], "profile": binding["profile"]}
@@ -538,6 +730,40 @@ def run_bindings(config, agent_filter=None, json_output=False):
         for row in rows:
             print(f"{row['workspace']} -> {row['agent']}/{row['profile']}")
     return 0
+
+
+def adopt_foreign_session(store, config, env, session):
+    """Make a session recorded in another account resumable from this one.
+
+    Codex resolves a session id inside `CODEX_HOME` only, which is why resuming
+    used to require the account that recorded it. When the id is not in the home
+    about to run, find the transcript in another account and hard link it in
+    first. Filenames are all that gets inspected.
+    """
+    home = env.get("CODEX_HOME")
+    if not home:
+        return None
+    if store.find_rollout_in(home, session):
+        return None
+    found = store.find_rollout(config, session, env=env, skip=home)
+    if not found:
+        return None
+    adopted = store.adopt_rollout(home, found)
+    if adopted:
+        print(f"Adopted {found.name} from another account.")
+    return adopted
+
+
+def session_sharing_note(store, config, agent, profile):
+    """One line describing where this account records its sessions."""
+    if agent != "codex":
+        return "Claude keeps its own session history"
+    mode = store.session_sharing_mode(config, profile)
+    if mode != "shared":
+        return f"private to codex/{profile} (sc sessions share to unify)"
+    if store.session_sharing(config).get("since"):
+        return "shared; transcripts from before sharing await sc sessions merge"
+    return "shared with every account and with a bare codex"
 
 
 def run_status(store, config, cwd, live=False, json_output=False):
@@ -558,6 +784,13 @@ def run_status(store, config, cwd, live=False, json_output=False):
                     },
                     "binding": matched,
                     "providerBinding": provider_matched,
+                    "sessionSharing": {
+                        "mode": store.session_sharing_mode(config, profile)
+                        if agent == "codex"
+                        else None,
+                        "default": store.session_sharing(config).get("default"),
+                        "since": store.session_sharing(config).get("since"),
+                    },
                     "profiles": rows,
                 },
                 indent=2,
@@ -575,6 +808,7 @@ def run_status(store, config, cwd, live=False, json_output=False):
         else config["providers"][provider]["baseUrl"]
     )
     print(f"Provider:  {provider} ({provider_note})")
+    print(f"Sessions:  {session_sharing_note(store, config, agent, profile)}")
     print("Priority:  Codex primary; Claude available inside Codex as a read-only consultant")
     print()
     print_rows(rows, active=(agent, profile))
@@ -704,6 +938,13 @@ def main(argv=None):
                     )
                 if not args.dry_run:
                     store.materialize_codex_provider(env, config, provider)
+            if (
+                args.command == "resume"
+                and agent == "codex"
+                and getattr(args, "session", None)
+                and not args.dry_run
+            ):
+                adopt_foreign_session(store, config, env, args.session)
             command = build_command(
                 agent,
                 args.command,
@@ -744,6 +985,8 @@ def main(argv=None):
             return 0
         if args.command == "provider":
             return run_provider(store, config, cwd, args)
+        if args.command == "sessions":
+            return run_sessions(store, config, args)
         if args.command == "profile" and args.profile_command == "add":
             name = store.normalize_profile(args.agent, args.name)
             existing = config["profiles"][args.agent].get(name)
