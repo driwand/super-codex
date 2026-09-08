@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-08
+
 ### Changed
 
 - The account picker no longer opens on an account whose limits are spent. The main account
