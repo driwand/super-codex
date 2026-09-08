@@ -1,573 +1,101 @@
 # Super Codex
 
-A local, Codex-first control plane for using multiple Codex accounts and consulting Claude without leaving Codex.
+Switch between Codex accounts and ask Claude for a second opinion, without leaving Codex.
 
-> **Disclaimer:** This project is **FULLY vibe coded**. Review the source and test
-> it in your own environment before relying on it.
+Super Codex wraps the official Codex and Claude Code CLIs. Run `sc` to pick an account, see its remaining limits, and start working. Your Codex session history is shared across accounts by default, so you can pick up where you left off.
 
-Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Codex remains the main interface. Account credentials stay isolated per account, local Codex session history is shared across accounts by default, and Claude is exposed to Codex as a read-only consultation tool.
+- **Multiple accounts:** keep up to five Codex logins and choose which one to use.
+- **Claude reviews:** ask Claude to review your work inside a Codex session.
+- **Project defaults:** choose an account or model provider for each workspace.
 
-## What it does
+No runtime dependencies, telemetry, or automatic account switching.
 
-- Uses Codex as the default coding agent.
-- Keeps an existing Codex login as `codex/main`.
-- Supports as many as five Codex accounts named `main`, `2`, `3`, `4`, and `5`.
-- Shows an arrow-key account picker with each account's identity and current limits when you run bare `sc`.
-- Lets you designate any configured Codex profile as the main account.
-- Lets you reorder accounts and globally switch bare `sc` between the picker and `main`.
-- Shares Codex session and archived-session history across every account and a bare `codex`, or keeps it separate per profile.
-- Routes any account through an OpenAI-compatible model provider without changing where its sessions are stored.
-- Gives every `sc`-launched Codex session a read-only `ask_claude` MCP tool.
-- Keeps longer Claude consultations running as monitored, cancellable background jobs.
-- Keeps direct Claude launch available as an explicit fallback.
-- Binds a project directory to a profile without modifying that project.
-- Reads Codex account identity and limits through Codex's app-server protocol.
-- Never reads, copies, decodes, exports, or swaps provider credential files.
-- Has no runtime dependencies, telemetry, daemon, or background updater.
+> This project is fully vibe coded. Review the source and test it in your environment before relying on it.
 
-It is not an AI agent, model proxy, token broker, or automatic quota-rotation service: it never switches accounts on its own.
+## Install
 
-## Requirements
+Requires **macOS or Linux**, **Python 3.9+**, and the [Codex CLI](https://developers.openai.com/codex/cli/). Install and authenticate [Claude Code](https://code.claude.com/docs/en/setup) if you want Claude reviews.
 
-- macOS or Linux
-- Python 3.9 or newer
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/) for the primary workflow
-- [Claude Code](https://code.claude.com/docs/en/setup) if you want Claude consultation or fallback
-
-Windows is not currently supported. The interactive providers may support Windows independently, but Super Codex's live Codex status transport is tested on POSIX systems only.
-
-## Install and update
-
-The supported installation is a standalone executable from a public GitHub
-Release. Download and inspect the dependency-free installer, then run it:
+Download the installer, inspect it, then run it:
 
 ```bash
 curl -fLO https://github.com/driwand/super-codex/releases/latest/download/install.py
 python3 install.py
 ```
 
-You can download `install.py` through a browser instead of using `curl`. The
-installer uses only Python's standard library. It downloads the release manifest
-and standalone `sc` asset, verifies its declared size, SHA-256 checksum, release
-tag, commit, and embedded build metadata, then installs:
+This installs `sc` and its alias `super-codex` in `~/.local/bin`. If that directory is missing from your `PATH`, follow the installer's instructions. No `sudo` or package manager is needed.
 
-```text
-~/.local/bin/sc
-~/.local/bin/super-codex -> sc
-```
-
-It never uses `sudo`, a Python package manager, or a virtual environment, and it
-does not edit shell startup files. If `~/.local/bin` is not on `PATH`, it prints
-the directory you need to add. Existing unrelated commands are never overwritten.
-
-Install an exact stable version or choose another destination when needed:
-
-```bash
-python3 install.py --version vX.Y.Z
-python3 install.py --bin-dir /your/bin/directory
-```
-
-Release tags are the only installation channel; `main` remains development
-source and the project is not published to PyPI. Contributors can run a checkout
-without installing it:
-
-```bash
-./sc setup
-```
-
-The distribution name is `super-codex`. Installation provides both `sc` and `super-codex`; this guide uses the shorter `sc` command. The former `sa` name deliberately is not installed because macOS already reserves it for process accounting.
-
-Updates are manual and explicit:
-
-```bash
-sc update --check
-sc update
-```
-
-Install or roll back to an exact immutable release tag with:
-
-```bash
-sc update --version vX.Y.Z
-```
-
-An update is downloaded beside the installed executable, fully verified, and
-atomically swapped into place. An interrupted or invalid download leaves the
-current installation unchanged.
-
-Confirm exactly what is running, including the requested Git revision and commit
-when the installer metadata provides them:
-
-```bash
-sc version
-sc version --json
-```
-
-Uninstall the standalone commands without deleting Super Codex configuration,
-profiles, sessions, or provider state:
-
-```bash
-sc uninstall
-```
-
-## Quick start
+## Start using it
 
 ```bash
 sc setup
-sc status --live
-```
-
-Your existing Codex login is `codex/main`. Add and authenticate another account using Codex's native login flow:
-
-```bash
-sc profile add codex 2 --label "Personal"
-```
-
-The label is optional; without one, this profile is labeled `Codex 2`. The command creates the isolated profile and immediately starts Codex's native login flow.
-
-Running the same command for an existing isolated profile starts a replacement login in a fresh provider home. Super Codex warns before login and atomically selects that home, including any new label, only after the provider reports verified authentication. Cancelling, failing, or exiting without authentication removes the unused candidate and leaves the existing provider home untouched. After a successful replacement, the previous provider home is retained so an already-running session is not disrupted, but future launches use the replacement. Credentials remain managed exclusively by the provider's native login flow; Super Codex never reads or copies them.
-
-Give the profiles meaningful labels and designate the account used by `sc main`:
-
-```bash
-sc profile label codex main "Work"
-sc profile label codex 2 "Personal"
-sc profile main codex 2
-```
-
-The picker marks the designated account as `(main)` and preselects it when no workspace binding applies, unless its limits are spent, in which case the highlight starts on the next account that can run. This changes profile routing only: it never moves or swaps provider files. The storage profile named `codex/main` remains the original shared Codex home, and `sc 1` continues to launch it directly.
-
-Confirm the identities and limits:
-
-```bash
-sc status --live
-```
-
-Run bare `sc` to fetch each configured account's username and current limits, then choose with the arrow keys and Enter:
-
-```bash
 sc
 ```
 
-Press `1`–`5` in the picker for a quick selection. You can also bypass the picker directly: `sc main` launches the designated main Codex account, while `sc 1` through `sc 5` launch fixed storage profiles.
+Your existing Codex login becomes `codex/main`. Bare `sc` opens an account picker with identities and current limits. Use the arrow keys and Enter to choose.
 
-```bash
-sc main
-sc 1
-sc 2
-```
-
-The picker is the default global behavior for Codex selections. Make bare `sc`
-launch the profile selected by the current workspace or global binding without a
-picker, or restore the picker, with:
-
-```bash
-sc config mode main
-sc config mode select
-```
-
-Interactive Codex sessions launched by `sc start`, bare `sc`, or `sc resume` use
-one status line for every profile. It shows the model and reasoning level, five-hour
-and weekly usage remaining, the current Git branch, and the working directory. Codex
-omits usage or branch fields when their data is unavailable. The override applies only
-to the launched session and does not modify the profile's `config.toml`.
-
-Then ask naturally inside Codex:
-
-```text
-Ask Claude to review this change and tell me what Codex may have missed.
-```
-
-Codex calls the locally authenticated Claude CLI through Super Codex's MCP server, receives Claude's response, and remains responsible for the final decision and any edits.
-
-Super Codex injects a session-only Codex `developer_instructions` override that routes
-natural requests such as “make Claude review these changes” directly to `ask_claude`.
-It forbids repository pre-inspection, direct Claude CLI fallback, manual MCP JSON, and
-automatic retries for those requests. Existing project `AGENTS.md` instructions still
-apply normally. Restart Codex after upgrading because the routing instruction and MCP
-tool are loaded when the session starts.
-
-Use `/mcp` once after starting Codex to confirm `super_codex_claude` is active. If
-you upgraded Super Codex while Codex was already open, restart that Codex session;
-MCP tools are discovered when the session starts.
-
-## Common workflows
-
-Bind the current project to one Codex profile. All profiles see the same local Codex resume history:
-
-```bash
-sc use codex main
-sc use codex 2
-```
-
-Resume a session with whichever account you want to use for the next turn:
-
-```bash
-sc resume --profile main
-sc resume --profile 2
-sc resume --profile 2 --last
-```
-
-With sharing on, any account resumes any session, so `--profile` selects which account
-pays for the next turn rather than which history you can reach. If the id belongs to an
-account you have deliberately split off, `sc resume` finds that transcript and links it
-into the account you are launching.
-
-Do not resume the exact same session concurrently from two accounts; both processes would append to the same local transcript.
-
-List all project bindings:
-
-```bash
-sc bindings
-sc bindings --json
-```
-
-The normal Claude workflow stays inside Codex:
-
-```text
-Ask Claude for an independent review of the current implementation.
-```
-
-Claude is restricted to `Read`, `Glob`, and `Grep` during MCP consultations. It cannot run Bash or edit files. Codex evaluates the advisory response and performs any approved work itself.
-
-You can still launch Claude directly as an explicit fallback:
-
-```bash
-sc start --agent claude
-sc ask --agent claude "Review the current changes"
-```
-
-The direct Claude command above uses no Codex tokens. For a low-overhead one-shot
-consultation routed through Codex, select low reasoning explicitly:
-
-```bash
-sc ask --reasoning low "Ask Claude to review the current change"
-```
-
-Make Claude the default for only the current project:
-
-```bash
-sc use claude main
-```
-
-Return the project to Codex:
-
-```bash
-sc use codex main
-```
-
-Resume native provider sessions:
-
-```bash
-sc resume --last
-sc resume --agent claude --last
-```
-
-Check account and installation health:
-
-```bash
-sc usage --all
-sc doctor --live
-sc status --live --json
-```
-
-Forward a provider-specific argument explicitly after `--native`:
-
-```bash
-sc start --agent claude --native --permission-mode plan
-```
-
-Super Codex never adds permission-bypass flags. Arguments after `--native` are passed through exactly as supplied, so review them with the same care you would use when invoking the provider directly.
-
-## Account and session model
-
-| Profile | Default storage behavior |
-| --- | --- |
-| `codex/main` | Inherits the normal Codex environment and existing login; owns `~/.codex` and its session directories |
-| `codex/2` through `codex/5` | Use private `CODEX_HOME` directories for authentication, configuration, and session directories |
-| `claude/main` | Inherits the normal Claude Code environment and existing login |
-
-Numbered Codex profiles are isolated by default. Add only the accounts you need:
+Add another account with Codex's native login flow:
 
 ```bash
 sc profile add codex 2 --label "Personal"
-sc profile add codex 3
 ```
 
-The five storage identifiers are exactly `main`, `2`, `3`, `4`, and `5` (`1` is accepted as a command-line alias for the shared `main` storage profile). Designate any configured account as the logical main account, or reorder every configured profile in the picker by listing each one exactly once:
+You can add accounts `3`, `4`, and `5` the same way. Credentials stay in their provider-managed homes; Super Codex never reads or copies credential files.
 
-```bash
-sc profile main codex 2
-sc profile order codex main 3 2
-```
+## Everyday commands
 
-Changing the logical main account also changes the global Codex default when Codex is the active global agent. Existing workspace bindings remain explicit and are not rewritten.
-
-Codex officially supports relocating state with `CODEX_HOME`. Super Codex preserves
-an exported shared home across direct and nested launches and keeps isolated provider
-homes separate. Codex canonicalizes rollout paths and refuses any rollout that resolves
-outside `CODEX_HOME`, so a symbolic link to a shared session directory breaks thread
-forking. Shared transcripts are therefore hard links: one file on disk, with a real name
-inside every account home. Session directories linked by releases before 0.6.0 are
-converted once into real directories.
-
-Isolated Claude profiles use `CLAUDE_CONFIG_DIR`, which works in current Claude Code
-releases but is not documented as a stable public interface. Super Codex remembers
-whether that variable was exported before entering an isolated profile so a nested
-shared-profile launch restores the original value or its absence; the default Claude
-profile therefore remains shared.
-
-Isolation covers provider configuration, credentials, logs, and account-specific
-databases stored in that provider home. It does not isolate operating-system state such
-as Git configuration, SSH keys, keychains, browser sessions, or files accessible to the
-launched agent. Session history is shared by default; see below.
-
-## Claude inside Codex
-
-Every Codex command launched through `sc` receives an ephemeral MCP configuration override for Super Codex's local STDIO server. This does not edit `~/.codex/config.toml`. Inside Codex, `/mcp` shows `super_codex_claude`, and Codex calls its `ask_claude` tool when you explicitly ask Claude or request a cross-model review. The server is marked required so a failed MCP startup is reported instead of silently falling back to shell probing.
-
-The consultation runs `claude -p` with the prompt over standard input. Only Claude's read-only `Read`, `Glob`, and `Grep` tools are enabled. No permission-bypass flags are added, and Claude's output is treated as untrusted advisory text rather than an instruction to edit automatically.
-
-Each request is a managed in-memory job. Super Codex waits up to 10 seconds for a fast
-answer; slower work returns a job ID and continues without holding the original MCP call
-open. Codex monitors the same job with `claude_job_status`, which reads only local state
-and consumes no additional Claude usage, and can stop it with `cancel_claude_job`.
-Completed job results remain available for 15 minutes, with at most 20 completed jobs
-retained. Jobs never survive the live Codex session.
-
-Super Codex assigns the first consultation a native Claude Code session ID. Later `ask_claude`
-calls in the same live Codex session resume that ID, so follow-up questions retain
-Claude's prior prompts, tool results, and answers. The ID is held only in the MCP
-server's memory and is isolated by workspace and Claude profile. Starting a new Codex
-process, including `sc resume`, starts a fresh Claude consultation context.
-
-To deliberately discard the active context, ask Codex explicitly, for example:
-
-```text
-Ask Claude with fresh context to review the new implementation.
-```
-
-Codex sets `new_context=true` on that call. Super Codex never guesses topic boundaries,
-and it replaces the active session ID only after the fresh call succeeds. Native Claude
-sessions are [stored as plaintext by Claude Code](https://code.claude.com/docs/en/sessions) inside the selected Claude profile.
-Super Codex never reads or copies those transcripts and does not delete them when a
-context is replaced or the MCP server exits. Use Claude Code's own retention settings to
-manage that provider-owned history.
-
-Super Codex allows only one active consultation for the same workspace and Claude profile. The lock is owned by the operating system and is released when the process exits, so a retry cannot start a second Claude process while the first remains live. MCP cancellation, explicit job cancellation, client disconnect, timeout, `SIGINT`, and `SIGTERM` all cancel the consultation and terminate its complete Claude process group. Changing the designated main Claude profile affects new jobs; an active job stays with the profile under which it started.
-
-For requests mentioning current changes, a diff, staged work, or uncommitted work,
-Super Codex obtains Git status plus staged and unstaged diffs itself using argument-array,
-read-only Git commands. External diff and text-conversion drivers are disabled. The
-context is sent directly to Claude, so Codex does not need to inspect or relay the diff.
-
-Three execution profiles provide predictable time and turn limits. `standard` is the
-default; Codex selects `quick` or `deep` only when the user explicitly requests it.
-Explicit per-request overrides may select any timeout from 10 seconds through 30 minutes
-and any turn limit from 1 through 50.
-
-| Profile | Wall-clock timeout | Agent turns |
-| --- | --- | --- |
-| `quick` | 1 minute | 3 |
-| `standard` | 5 minutes | 10 |
-| `deep` | 30 minutes | 30 |
-
-Other resource controls remain deliberately bounded:
-
-| Control | Default | Override |
-| --- | --- | --- |
-| Claude output per model response | 4,096 tokens | `SUPER_CODEX_CLAUDE_MAX_OUTPUT_TOKENS` (512-16,384) |
-| Claude dollar budget | none | explicit `max_budget_usd` or `SUPER_CODEX_CLAUDE_MAX_BUDGET_USD` (0.01-10) |
-| Claude effort | `low` | `SUPER_CODEX_CLAUDE_EFFORT` (`low` through `max`) |
-| Parallel Claude read tools | 1 | Not configurable through Super Codex |
-| Git change context sent to Claude | 24,000 characters | Not configurable |
-| Text returned to Codex | 8,000 characters | Not configurable |
-
-`SUPER_CODEX_CLAUDE_TIMEOUT_SECONDS` and `SUPER_CODEX_CLAUDE_MAX_TURNS` explicitly
-replace the selected profile's defaults. The output-token setting follows Claude Code's
-documented `CLAUDE_CODE_MAX_OUTPUT_TOKENS` interface. When explicitly supplied, the
-dollar budget uses Claude Code's client-side cost estimate; it is a stopping guard, not
-an exact prediction of subscription quota impact. The final 8,000-character truncation
-protects Codex context only and does not refund or prevent tokens Claude already generated.
-
-If a consultation appears slow, monitor the returned job or cancel it. Do not start a replacement while its status is uncertain; Super Codex will reject a duplicate for that workspace and profile.
-
-Resuming Claude preserves useful context but increases the amount of prior conversation
-Claude may need to process. Start a fresh context for unrelated work instead of allowing
-one review thread to grow indefinitely.
-
-## Model providers
-
-An account normally talks to its own vendor with its own login. A **provider** points
-that same account at an OpenAI-compatible endpoint instead — a gateway, a self-hosted
-model, or any other service that speaks the Responses or Chat Completions API.
-
-```bash
-sc provider add explabs \
-  --base-url https://api.experientiallabs.ai/v1 \
-  --env-key EXPLABS_API_KEY \
-  --model gpt-5.6-terra \
-  --label "Experiential Labs"
-
-sc provider list                  # show providers and whether each credential is exported
-sc --provider explabs             # one launch through the provider
-sc provider use explabs           # route this workspace through it
-sc provider use explabs --global  # route every workspace through it
-sc provider use default           # back to the account's own authentication
-sc unuse                          # release this workspace's account and provider bindings
-sc provider show explabs          # print the Codex profile this generates
-sc provider remove explabs
-```
-
-`default` is a reserved provider name meaning the account's own authentication. It is
-always available and is what a fresh configuration uses.
-
-A provider binding is independent of an account binding: `sc provider use` records the
-provider for the workspace without pinning which account that workspace launches.
-
-**Sessions are unaffected by the provider.** The provider is applied as a Codex profile
-flag, never as a change of `CODEX_HOME`, so an account's transcripts stay in that
-account's home no matter which provider produced them. Switching providers mid-project
-leaves `codex resume` showing one continuous history.
-
-Super Codex writes the provider's Codex profile into whichever account home a launch
-uses, regenerating it each time, so a provider added once works from every account.
-The generated file names the credential's environment variable; the secret itself is
-never read, copied, or stored by Super Codex. Export it in the shell that launches the
-agent:
-
-```bash
-export EXPLABS_API_KEY="..."
-```
-
-The `export` is required. A bare `KEY=value` line in a shell file is invisible to child
-processes, and the agent will report a missing environment variable while `echo $KEY`
-still looks correct in the same shell.
-
-Providers apply to Codex. Claude uses its own account authentication and rejects
-`--provider`.
-
-## Session history
-
-By default every Codex account, and a bare `codex`, reads and writes one session
-history. `sc` reconciles it before launch and again after a normally exiting Codex
-process, including custom session names, so routine use requires neither `sync` nor
-`merge`. `sc resume <id>` works whichever account you launch, and so does the `codex
-resume` picker.
-
-```bash
-sc sessions status              # where each account records sessions
-sc sessions merge --dry-run     # preview unifying transcripts recorded before sharing
-sc sessions merge               # unify them
-sc sessions split --profile 2   # keep account 2's future sessions to itself
-sc sessions share --profile 2   # put it back
-sc sessions sync                # reconcile immediately instead of waiting for launch or exit
-```
-
-The store is the shared Codex home, normally `~/.codex`, which is why a bare `codex`
-sees the same history. Sharing costs no disk space: a shared transcript is one file with
-a hard link in each account home, not a copy. The homes must therefore be on the same
-filesystem; if they are not, Super Codex fails without creating a divergent copy. Nothing
-is ever deleted, and `sc sessions split` stops future sharing without unlinking what an
-account can already see, because removing a link could remove the only remaining copy.
-
-Upgrading an existing installation shares sessions recorded from that point on and
-leaves the earlier ones where they are, so an upgrade does not silently reshape your
-resume picker. `sc sessions status` reports how many are waiting, and one `sc sessions
-merge` unifies them permanently. Once status reports no cutoff or pending transcripts,
-repeating `merge` is unnecessary.
-
-Automatic post-exit synchronization, `sc sessions sync`, and `sc sessions merge` also
-reconcile active custom session names through Codex's experimental app-server API. The
-most recently updated non-empty name wins; the shared home wins an exact timestamp tie.
-Codex's SQLite databases remain account-local and are never copied or edited directly.
-This name API is experimental, so Super Codex reports protocol failures rather than
-silently guessing a database schema.
-
-These groups follow the shared store, and `sc sessions include` / `sc sessions exclude`
-change the set:
-
-| Group | What it covers |
+| Command | What it does |
 | --- | --- |
-| `sessions` | Session transcripts |
-| `archived_sessions` | Archived transcripts |
-| `attachments` | Images attached to a session |
-| `history` | The typed-prompt history behind the up arrow |
-| `config` | `config.toml` and the sibling `*.config.toml` provider profiles |
+| `sc` | Open the account picker |
+| `sc 2` | Launch account 2 directly |
+| `sc main` | Launch your designated main account |
+| `sc profile main codex 2` | Make account 2 your main account |
+| `sc use codex 2` | Set account 2 as this project's default |
+| `sc resume --profile 2 --last` | Resume the last session with account 2 |
+| `sc status --live` | Show account identities and limits |
+| `sc doctor --live` | Check setup and provider health |
 
-`config` is a copy, not a link, because Codex rewrites `config.toml` whenever a setting
-changes. The shared Codex home is the source of truth for it: edit there, and each
-account picks the file up on its next launch, keeping a timestamped backup of what it
-replaced. Edits made inside an isolated account home are overwritten. Exclude the group
-to give an account its own settings.
+Prefer to skip the picker? Run `sc config mode main` to launch the project's default account directly. Restore it with `sc config mode select`.
 
-`auth.json` is never shared, read, or copied under any setting. It is what makes the
-accounts different accounts.
+Session sharing lets you continue work with another account. Avoid opening the same session from two accounts at once, since both would write to the same transcript.
 
-## Configuration
+## Ask Claude for a review
 
-The source of truth is:
+Inside a Codex session launched with `sc`, ask:
 
 ```text
-~/.config/super-codex/config.json
+Ask Claude to review the current changes and tell me what you may have missed.
 ```
 
-Use the CLI to inspect the schema-versioned registry and change bare-command behavior:
+Claude can read and search files during the review, but cannot run shell commands or edit files. Codex receives the advice and handles any edits. Longer reviews run as monitored jobs, and follow-up questions retain Claude's context for that live Codex session.
+
+Use `/mcp` inside Codex to check that `super_codex_claude` is active. Restart your Codex session after upgrading to load the latest integration.
+
+To use Claude directly instead:
 
 ```bash
-sc config path
-sc config show
-sc profile main codex 2 # designate codex/2 as the main Codex account
-sc config mode          # print select or main
-sc config mode main     # bare sc launches the selected binding directly
-sc config mode select   # Codex bindings open the live picker
+sc start --agent claude
 ```
 
-The current config schema is version 2. This profile model is a clean break: schema-v1 registries and the former `second` profile name are not migrated. Super Codex always uses `~/.config/super-codex`; an old `~/.config/super-agent-control` directory is ignored and left untouched. Provider credential files are never read or copied by Super Codex.
-
-Override the state root for testing or portable setups:
+## Update or uninstall
 
 ```bash
-SUPER_AGENT_HOME=/path/to/state sc status
+sc update --check    # Check for a release
+sc update           # Install it
+sc version          # Show the installed build
+sc uninstall        # Remove commands; keep your configuration and sessions
 ```
 
-The registry contains profile metadata, workspace bindings, and model provider definitions only. It contains no provider tokens or API keys: a provider definition stores the NAME of the environment variable holding its credential, never the credential. Isolated provider credentials are written by the provider's own native login command into that profile's private home.
+## More details
 
-## Usage reporting
+- [Accounts and isolation](docs/usage.md#account-and-session-model)
+- [Session sharing and separate histories](docs/usage.md#session-history)
+- [Custom model providers](docs/usage.md#model-providers)
+- [Claude context, timeouts, and budgets](docs/usage.md#claude-inside-codex)
+- [Installation options and rollback](docs/usage.md#install-and-update)
+- [Configuration](docs/usage.md#configuration) and [usage reporting](docs/usage.md#usage-reporting)
+- [Security](SECURITY.md), [contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md)
 
-Codex usage is fetched through the local Codex app-server. Depending on the account, this may report rolling windows, credits, or an organization spend control. The API is experimental, so failures are reported as unavailable rather than guessed.
+Codex's usage API is experimental; unavailable limits are reported as such. Account isolation covers provider state, not your operating-system account. See the reference for the full behavior and limitations.
 
-Claude Code does not expose a supported standalone usage command. Run `/usage` inside Claude for its authoritative limits.
-
-## Security and provider terms
-
-This project is intended for legitimate separation of personal, work, client, or organization accounts. It does not automatically rotate accounts, evade rate limits, or bypass provider safeguards. You select the account explicitly: nothing launches without your keypress, no account is ever switched mid-session, and a session that reaches a limit stops rather than moving to another account. The picker does read the limits it already displays when it decides which account to highlight first, so a main account whose window is spent does not start under the cursor — the highlight moves, the choice stays yours. You are responsible for using each account in accordance with the applicable provider terms and organizational policies.
-
-See [SECURITY.md](SECURITY.md) for the threat model and vulnerability reporting process.
-
-## Development
-
-```bash
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q src tests
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
-
-## Acknowledgments
-
-The implementation is original, but its design was informed by publicly documented ideas in:
-
-- [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc)
-- [Ducksss/codex-profiles](https://github.com/Ducksss/codex-profiles)
-- [realiti4/claude-swap](https://github.com/realiti4/claude-swap)
-- [Loongphy/codex-auth](https://github.com/Loongphy/codex-auth)
-
-No source code from those projects is bundled or copied here, and they are not runtime dependencies.
-
-## Trademark notice
-
-Codex, ChatGPT, and OpenAI are trademarks or registered trademarks of OpenAI. Claude and Anthropic are trademarks or registered trademarks of Anthropic. Super Codex is an independent community project and is not affiliated with, endorsed by, or sponsored by OpenAI or Anthropic.
-
-## License
-
-Licensed under the [MIT License](LICENSE).
+Super Codex is an independent community project, unaffiliated with OpenAI or Anthropic. Codex, ChatGPT, OpenAI, Claude, and Anthropic are trademarks of their respective owners. Licensed under [MIT](LICENSE).
