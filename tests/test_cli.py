@@ -10,7 +10,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from super_agent.cli import _picker_lines, choose_profile, main, reconcile_session_names
+from super_agent.cli import (
+    _initial_index,
+    _picker_lines,
+    choose_profile,
+    main,
+    reconcile_session_names,
+)
 from super_agent.config import Store
 
 
@@ -434,6 +440,90 @@ class CliTests(unittest.TestCase):
         self.assertIn("Personal (main)", rendered)
         self.assertIn("me@example.com", rendered)
         self.assertIn("5h: 25% used", rendered)
+
+    def test_picker_marks_a_drained_account(self):
+        lines = _picker_lines(
+            [{
+                "profile": "main",
+                "label": "Work",
+                "main": True,
+                "authenticated": True,
+                "authDetail": "",
+                "live": ["5h: 100% used"],
+                "exhausted": True,
+            }],
+            0,
+        )
+        self.assertIn("[limits spent]", "\n".join(lines))
+
+    def rows_for_cursor(self, main_exhausted=False, second_exhausted=False):
+        return [
+            {
+                "profile": "main",
+                "label": "Work",
+                "main": True,
+                "authenticated": True,
+                "authDetail": "",
+                "live": [],
+                "exhausted": main_exhausted,
+            },
+            {
+                "profile": "2",
+                "label": "Personal",
+                "authenticated": True,
+                "authDetail": "",
+                "live": [],
+                "exhausted": second_exhausted,
+            },
+        ]
+
+    def test_cursor_stays_on_main_while_it_has_limits_left(self):
+        self.assertEqual(_initial_index(self.rows_for_cursor(), "main"), 0)
+
+    def test_cursor_skips_a_drained_main(self):
+        rows = self.rows_for_cursor(main_exhausted=True)
+        self.assertEqual(_initial_index(rows, "main"), 1)
+
+    def test_cursor_wraps_to_reach_accounts_listed_before_the_bound_one(self):
+        rows = self.rows_for_cursor(second_exhausted=True)
+        self.assertEqual(_initial_index(rows, "2"), 0)
+
+    def test_cursor_keeps_main_when_every_account_is_drained(self):
+        rows = self.rows_for_cursor(main_exhausted=True, second_exhausted=True)
+        self.assertEqual(_initial_index(rows, "main"), 0)
+
+    def test_cursor_stays_put_when_the_bound_account_status_is_unknown(self):
+        # A lapsed login or a probe that failed is not a spent limit. Moving the
+        # cursor on that reading would silently start a different identity in a
+        # workspace bound to this one.
+        rows = self.rows_for_cursor()
+        rows[0]["authenticated"] = False
+        self.assertEqual(_initial_index(rows, "main"), 0)
+        rows = self.rows_for_cursor()
+        rows[0]["error"] = "profile unavailable"
+        self.assertEqual(_initial_index(rows, "main"), 0)
+
+    def test_cursor_only_lands_on_an_account_that_can_run(self):
+        rows = self.rows_for_cursor(main_exhausted=True)
+        rows[1]["authenticated"] = False
+        self.assertEqual(_initial_index(rows, "main"), 0)
+
+    def test_drained_main_is_not_what_enter_selects(self):
+        class FakeTTY(io.StringIO):
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 99
+
+        rows = self.rows_for_cursor(main_exhausted=True)
+        with patch("super_agent.cli.termios.tcgetattr", return_value=[]), patch(
+            "super_agent.cli.termios.tcsetattr"
+        ), patch("super_agent.cli.tty.setcbreak"), patch(
+            "super_agent.cli.os.read", side_effect=[b"\r"]
+        ):
+            selected = choose_profile(rows, FakeTTY(), FakeTTY(), initial_profile="main")
+        self.assertEqual(selected, "2")
 
     def test_picker_arrow_key_changes_selection(self):
         class FakeTTY(io.StringIO):

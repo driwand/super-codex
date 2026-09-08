@@ -517,6 +517,43 @@ def format_codex_live(status):
     return lines
 
 
+def _percent(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def codex_limits_exhausted(status):
+    """Report whether a Codex account has spent a limit it cannot work around.
+
+    A window at or past 100% blocks new turns until it resets, and the app
+    server's own limit and spend-control flags say the same thing outright.
+    Anything short of that stays usable: an account at 98% still runs, and a
+    window that reports no percentage is treated as available rather than
+    guessed at.
+    """
+    payload = status.rate_limits
+    snapshots = payload.get("rateLimitsByLimitId") or {}
+    if not snapshots and payload.get("rateLimits"):
+        snapshots = {"codex": payload["rateLimits"]}
+    for snapshot in snapshots.values():
+        # Unlimited credits keep an account working past a spent window, so the
+        # window percentages below say nothing about whether it can still run.
+        if (snapshot.get("credits") or {}).get("unlimited"):
+            continue
+        if snapshot.get("rateLimitReachedType") or snapshot.get("spendControlReached"):
+            return True
+        for key in ("primary", "secondary"):
+            used = _percent((snapshot.get(key) or {}).get("usedPercent"))
+            if used is not None and used >= 100:
+                return True
+        remaining = _percent((snapshot.get("individualLimit") or {}).get("remainingPercent"))
+        if remaining is not None and remaining <= 0:
+            return True
+    return False
+
+
 def exec_command(command, env, cwd, dry_run=False, agent=None, after=None):
     if dry_run:
         print(command_display(command, env, agent))

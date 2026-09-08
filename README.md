@@ -25,7 +25,7 @@ Super Codex is a thin wrapper around the official Codex and Claude Code CLIs. Co
 - Never reads, copies, decodes, exports, or swaps provider credential files.
 - Has no runtime dependencies, telemetry, daemon, or background updater.
 
-It is not an AI agent, model proxy, token broker, or automatic quota-rotation service.
+It is not an AI agent, model proxy, token broker, or automatic quota-rotation service: it never switches accounts on its own.
 
 ## Requirements
 
@@ -134,7 +134,7 @@ sc profile label codex 2 "Personal"
 sc profile main codex 2
 ```
 
-The picker marks the designated account as `(main)` and preselects it when no workspace binding applies. This changes profile routing only: it never moves or swaps provider files. The storage profile named `codex/main` remains the original shared Codex home, and `sc 1` continues to launch it directly.
+The picker marks the designated account as `(main)` and preselects it when no workspace binding applies, unless its limits are spent, in which case the highlight starts on the next account that can run. This changes profile routing only: it never moves or swaps provider files. The storage profile named `codex/main` remains the original shared Codex home, and `sc 1` continues to launch it directly.
 
 Confirm the identities and limits:
 
@@ -540,7 +540,7 @@ Claude Code does not expose a supported standalone usage command. Run `/usage` i
 
 ## Security and provider terms
 
-This project is intended for legitimate separation of personal, work, client, or organization accounts. It does not automatically rotate accounts, choose accounts based on remaining quota, evade rate limits, or bypass provider safeguards. You select the account explicitly. You are responsible for using each account in accordance with the applicable provider terms and organizational policies.
+This project is intended for legitimate separation of personal, work, client, or organization accounts. It does not automatically rotate accounts, evade rate limits, or bypass provider safeguards. You select the account explicitly: nothing launches without your keypress, no account is ever switched mid-session, and a session that reaches a limit stops rather than moving to another account. The picker does read the limits it already displays when it decides which account to highlight first, so a main account whose window is spent does not start under the cursor — the highlight moves, the choice stays yours. You are responsible for using each account in accordance with the applicable provider terms and organizational policies.
 
 See [SECURITY.md](SECURITY.md) for the threat model and vulnerability reporting process.
 

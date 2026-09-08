@@ -14,6 +14,7 @@ from .adapters import (
     auth_command,
     auth_status,
     build_command,
+    codex_limits_exhausted,
     codex_live_status,
     codex_set_thread_names,
     codex_thread_names,
@@ -251,6 +252,7 @@ def _profile_row(store, config, agent, name, live):
         "authenticated": False,
         "authDetail": "",
         "live": [],
+        "exhausted": False,
     }
     try:
         env = store.environment(agent, name, config)
@@ -264,7 +266,9 @@ def _profile_row(store, config, agent, name, live):
     if live and agent == "codex" and status.authenticated:
         try:
             sqlite_home = store.home / "runtime" / "codex" / name
-            row["live"] = format_codex_live(codex_live_status(env, sqlite_home=sqlite_home))
+            live_status = codex_live_status(env, sqlite_home=sqlite_home)
+            row["live"] = format_codex_live(live_status)
+            row["exhausted"] = codex_limits_exhausted(live_status)
         except AdapterError as exc:
             row["live"] = [f"usage unavailable: {exc}"]
     return row
@@ -289,6 +293,63 @@ def profile_rows(store, config, live=False, only=None):
     return [_profile_row(store, config, agent, name, live) for agent, name in targets]
 
 
+def _row_state(row):
+    if row.get("error"):
+        return "unavailable"
+    if not row["authenticated"]:
+        return "login needed"
+    return "limits spent" if row.get("exhausted") else "ready"
+
+
+def _startable(row):
+    """Report whether a row can begin a session right now."""
+    return _row_state(row) == "ready"
+
+
+def _spent(row):
+    """Report whether a row's limits are known to be spent.
+
+    Only a positive usage reading counts. An account whose status could not be
+    read — a slow probe, a login that has lapsed — is not spent, merely unknown,
+    and an unknown account keeps the cursor rather than losing it to a guess.
+    """
+    return bool(row.get("exhausted"))
+
+
+def _initial_index(rows, initial_profile):
+    """Choose the row the picker opens on.
+
+    The bound profile — main, unless this workspace is bound elsewhere — holds
+    the cursor unless its limits are known to be spent, in which case the cursor
+    moves to the next account that can run, wrapping so accounts listed before
+    it stay reachable. The two conditions are deliberately not symmetric: the
+    cursor leaves the bound account only on a definite reading, but lands only
+    where a session can actually start. With nothing runnable the bound profile
+    keeps the cursor and its state is shown instead.
+
+    This only moves a highlight. Selection stays an explicit keypress, and no
+    account is ever switched to on its own, which is the line AGENTS.md draws
+    against automatic rotation around provider limits.
+    """
+    preferred = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if row["profile"] == initial_profile
+        ),
+        None,
+    )
+    if preferred is None:
+        return next((index for index, row in enumerate(rows) if _startable(row)), 0)
+    if not _spent(rows[preferred]):
+        return preferred
+    for offset in range(1, len(rows)):
+        candidate = (preferred + offset) % len(rows)
+        if _startable(rows[candidate]):
+            return candidate
+    return preferred
+
+
 def _picker_lines(rows, selected_index):
     lines = [
         "Choose a Codex account",
@@ -297,10 +358,7 @@ def _picker_lines(rows, selected_index):
     ]
     for index, row in enumerate(rows):
         marker = ">" if index == selected_index else " "
-        if row.get("error"):
-            state = "unavailable"
-        else:
-            state = "ready" if row["authenticated"] else "login needed"
+        state = _row_state(row)
         main = " (main)" if row.get("main") else ""
         lines.append(f"{marker} {row['profile']:<4} {row['label']}{main}  [{state}]")
         details = row["live"] or ([row["authDetail"]] if row["authDetail"] else [])
@@ -319,14 +377,7 @@ def choose_profile(rows, input_stream=None, output_stream=None, initial_profile=
             "The account picker requires a terminal. Use `sc main`, `sc 2`, or "
             "set `sc config mode main`."
         )
-    selected_index = next(
-        (
-            index
-            for index, row in enumerate(rows)
-            if row["profile"] == initial_profile
-        ),
-        0,
-    )
+    selected_index = _initial_index(rows, initial_profile)
     descriptor = input_stream.fileno()
     previous = termios.tcgetattr(descriptor)
     output_stream.write("\x1b[?1049h\x1b[?25l")
@@ -391,10 +442,7 @@ def choose_profile(rows, input_stream=None, output_stream=None, initial_profile=
 def print_rows(rows, active=None):
     for row in rows:
         marker = "*" if active == (row["agent"], row["profile"]) else " "
-        if row.get("error"):
-            auth = "unavailable"
-        else:
-            auth = "ready" if row["authenticated"] else "login needed"
+        auth = _row_state(row)
         main = " (main)" if row.get("main") else ""
         print(
             f"{marker} {row['agent']}/{row['profile']}  {row['label']}{main}  "

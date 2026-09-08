@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The account picker no longer opens on an account whose limits are spent. The main account
+  keeps the cursor while it has limits left; once a window is fully spent the cursor starts
+  on the next account that can run, wrapping so accounts listed before the bound one stay
+  reachable, and stays on main when no other account can run. Selection is still an explicit
+  keypress: only the starting highlight moves, and no account is ever switched to on its own.
+  Accounts report a new `limits spent` state alongside `ready`, `login needed`, and
+  `unavailable`, so the reason the highlight moved is visible. An account close to its limit
+  is still treated as usable, as is one holding unlimited credits; only a window at or past
+  100%, a reported rate-limit or spend-control state, or an exhausted individual spend limit
+  counts as spent. An account whose status could not be read is treated as unknown rather
+  than spent, so a slow probe or a lapsed login never quietly hands the cursor to a
+  different identity.
+
 ## [0.8.1] - 2026-09-07
 
 ### Fixed

@@ -14,6 +14,7 @@ from super_agent.adapters import (
     LiveStatus,
     auth_status,
     build_command,
+    codex_limits_exhausted,
     codex_live_status,
     codex_set_thread_names,
     codex_thread_names,
@@ -369,6 +370,63 @@ class StatusTests(unittest.TestCase):
         lines = format_codex_live(status)
         self.assertIn("53% remaining", lines[1])
         self.assertIn("3066.33/6500", lines[1])
+
+
+class CodexExhaustionTests(unittest.TestCase):
+    def status(self, snapshot):
+        return LiveStatus(
+            account={"email": "person@example.com"},
+            rate_limits={"rateLimitsByLimitId": {"codex": snapshot}},
+        )
+
+    def test_a_spent_window_is_exhausted(self):
+        snapshot = {
+            "primary": {"usedPercent": 100, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 16, "windowDurationMins": 10080},
+        }
+        self.assertTrue(codex_limits_exhausted(self.status(snapshot)))
+
+    def test_a_nearly_spent_window_is_still_usable(self):
+        snapshot = {
+            "primary": {"usedPercent": 98, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 15, "windowDurationMins": 10080},
+        }
+        self.assertFalse(codex_limits_exhausted(self.status(snapshot)))
+
+    def test_either_window_can_exhaust_the_account(self):
+        snapshot = {
+            "primary": {"usedPercent": 4, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 100, "windowDurationMins": 10080},
+        }
+        self.assertTrue(codex_limits_exhausted(self.status(snapshot)))
+
+    def test_reported_limit_and_spend_flags_are_believed(self):
+        self.assertTrue(codex_limits_exhausted(self.status({"rateLimitReachedType": "primary"})))
+        self.assertTrue(codex_limits_exhausted(self.status({"spendControlReached": True})))
+
+    def test_spent_individual_limit_is_exhausted(self):
+        snapshot = {"individualLimit": {"remainingPercent": 0, "used": "6500", "limit": "6500"}}
+        self.assertTrue(codex_limits_exhausted(self.status(snapshot)))
+
+    def test_unlimited_credits_outlast_a_spent_window(self):
+        snapshot = {
+            "primary": {"usedPercent": 100, "windowDurationMins": 300},
+            "credits": {"unlimited": True},
+        }
+        self.assertFalse(codex_limits_exhausted(self.status(snapshot)))
+
+    def test_unreported_usage_is_treated_as_available(self):
+        self.assertFalse(codex_limits_exhausted(self.status({"primary": {}})))
+        self.assertFalse(
+            codex_limits_exhausted(LiveStatus(account={}, rate_limits={}))
+        )
+
+    def test_flat_rate_limit_payload_is_read(self):
+        status = LiveStatus(
+            account={},
+            rate_limits={"rateLimits": {"primary": {"usedPercent": 100}}},
+        )
+        self.assertTrue(codex_limits_exhausted(status))
 
 
 if __name__ == "__main__":
