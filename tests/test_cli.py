@@ -4,7 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -72,6 +72,13 @@ class CliTests(unittest.TestCase):
         code, _ = self.output(["upd"])
         self.assertEqual(code, 0)
         run_update.assert_called_once_with(False, None)
+
+    def test_unknown_top_level_command_has_a_short_actionable_error(self):
+        stream = io.StringIO()
+        with redirect_stderr(stream):
+            code = main(["e"])
+        self.assertEqual(code, 2)
+        self.assertEqual(stream.getvalue(), "sc: Unknown command 'e'. Run `sc --help` for available commands.\n")
 
     def test_profile_add_overrides_existing_profile_only_after_successful_login(self):
         self.add_account_2()

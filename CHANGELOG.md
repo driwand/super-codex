@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-09-10
+
+### Fixed
+
+- Unknown top-level commands now show a short `Unknown command` message instead of an
+  argparse error that lists every command.
+
 ## [0.9.2] - 2026-09-10
 
 ### Added

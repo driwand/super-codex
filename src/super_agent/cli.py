@@ -40,6 +40,29 @@ from .mcp_server import serve as serve_mcp
 from .provenance import print_installation_provenance
 from .release import ReleaseError, run_uninstall, run_update
 
+COMMAND_NAMES = (
+    "version",
+    "update",
+    "uninstall",
+    "setup",
+    "start",
+    "ask",
+    "resume",
+    "status",
+    "usage",
+    "use",
+    "unuse",
+    "bindings",
+    "profiles",
+    "profile",
+    "provider",
+    "sessions",
+    "login",
+    "doctor",
+    "config",
+    "mcp-server",
+)
+
 
 def parser():
     root = argparse.ArgumentParser(
@@ -1014,6 +1037,12 @@ def main(argv=None):
         argv = ["start", "--profile", argv[0]] + argv[1:]
     if bare_invocation:
         argv = ["start"]
+    if argv and not argv[0].startswith("-") and argv[0] not in COMMAND_NAMES:
+        print(
+            f"sc: Unknown command {argv[0]!r}. Run `sc --help` for available commands.",
+            file=sys.stderr,
+        )
+        return 2
     args = parser().parse_args(argv)
     if args.command == "version":
         print_installation_provenance(args.json)
