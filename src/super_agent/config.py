@@ -1153,6 +1153,84 @@ class Store:
                 total += sum(1 for entry in files if entry.startswith("rollout-"))
         return total
 
+    def purge_candidates(self, config, older_than_days=15, now=None, env=None):
+        """List owned Codex transcripts old enough for an explicit purge.
+
+        Rollout timestamps are taken from the filename, never transcript content or
+        mutable filesystem metadata. Every configured account path is included so
+        deleting a shared transcript removes each of its hard links.
+        """
+        if older_than_days < 1:
+            raise ConfigError("Session retention must be at least one day")
+        cutoff = (now or datetime.datetime.now()) - datetime.timedelta(
+            days=older_than_days
+        )
+        candidates = []
+        visited_homes = set()
+        for row in self.codex_homes(config, env):
+            home = absolute_path(row["home"])
+            if home in visited_homes:
+                continue
+            visited_homes.add(home)
+            for name in CODEX_SESSION_DIRECTORIES:
+                root = home / name
+                try:
+                    root_status = root.lstat()
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise ConfigError(f"Cannot inspect Codex session path {root}: {exc}") from exc
+                if not stat.S_ISDIR(root_status.st_mode) or stat.S_ISLNK(root_status.st_mode):
+                    raise ConfigError(f"Refusing unsafe Codex session path: {root}")
+                if root_status.st_uid != os.getuid():
+                    raise ConfigError(f"Codex session path is not owned by this user: {root}")
+                for directory, _, files in os.walk(os.fspath(root), followlinks=False):
+                    for entry in files:
+                        recorded_at = rollout_recorded_at(entry)
+                        if recorded_at is None or recorded_at >= cutoff:
+                            continue
+                        path = Path(directory) / entry
+                        try:
+                            details = path.lstat()
+                        except OSError as exc:
+                            raise ConfigError(f"Cannot inspect Codex transcript {path}: {exc}") from exc
+                        if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid():
+                            raise ConfigError(f"Refusing unsafe Codex transcript: {path}")
+                        candidates.append(
+                            {
+                                "path": path,
+                                "root": root,
+                                "directory": name,
+                                "device": details.st_dev,
+                                "inode": details.st_ino,
+                                "size": details.st_size,
+                            }
+                        )
+        return sorted(candidates, key=lambda candidate: os.fspath(candidate["path"])), cutoff
+
+    def purge_transcripts(self, candidates):
+        """Remove a previewed candidate set after verifying it has not changed."""
+        for candidate in candidates:
+            path = candidate["path"]
+            try:
+                details = path.lstat()
+            except OSError as exc:
+                raise ConfigError(f"Cannot inspect Codex transcript {path}: {exc}") from exc
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.getuid()
+                or details.st_dev != candidate["device"]
+                or details.st_ino != candidate["inode"]
+            ):
+                raise ConfigError(f"Codex transcript changed since preview: {path}")
+        for candidate in candidates:
+            path = candidate["path"]
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise ConfigError(f"Cannot purge Codex transcript {path}: {exc}") from exc
+        return len(candidates)
+
     def sessions_status(self, config, env=None):
         """Report, per account, how far its transcripts are from the store."""
         shared_home = self.shared_codex_home(env)

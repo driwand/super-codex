@@ -859,6 +859,13 @@ class SessionsCliTests(unittest.TestCase):
         path.write_text("transcript", encoding="utf-8")
         return path
 
+    def write_archived_rollout(self, home, day, name):
+        directory = Path(home) / "archived_sessions" / day
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_text("transcript", encoding="utf-8")
+        return path
+
     def set_cutoff(self, since):
         store = Store(self.state)
         config = store.load()
@@ -993,6 +1000,86 @@ class SessionsCliTests(unittest.TestCase):
         self.assertIn("Would unify 1 transcripts", output)
         self.assertIn("Nothing was written", output)
         self.assertFalse((account / "sessions" / "2026" / "07").exists())
+
+    def test_purge_previews_all_old_session_paths_without_deleting(self):
+        self.add_account_2()
+        account = self.account_home()
+        session = self.write_rollout(
+            self.codex_home, "2020/01/01", "rollout-2020-01-01T10-00-00-old.jsonl"
+        )
+        archived = self.write_archived_rollout(
+            self.codex_home, "2020/01/02", "rollout-2020-01-02T10-00-00-archived.jsonl"
+        )
+        linked = account / "sessions" / "2020" / "01" / "01" / session.name
+        linked.parent.mkdir(parents=True, exist_ok=True)
+        os.link(session, linked)
+
+        code, output = self.output(["sessions", "purge", "--dry-run"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("Would permanently delete 3 transcript paths", output)
+        self.assertIn("2 unique transcripts", output)
+        self.assertIn("Reclaimable storage: 20 bytes", output)
+        self.assertIn(str(self.codex_home / "sessions") + "/*", output)
+        self.assertIn(str(self.codex_home / "archived_sessions") + "/*", output)
+        self.assertIn(str(account / "sessions") + "/*", output)
+        self.assertNotIn(str(session), output)
+        self.assertNotIn(str(archived), output)
+        self.assertNotIn(str(linked), output)
+        self.assertTrue(session.exists())
+        self.assertTrue(archived.exists())
+        self.assertTrue(linked.exists())
+
+    @patch("builtins.input", return_value="PURGE")
+    def test_purge_requires_confirmation_and_removes_sessions_and_archives(self, confirm):
+        session = self.write_rollout(
+            self.codex_home, "2020/01/01", "rollout-2020-01-01T10-00-00-old.jsonl"
+        )
+        archived = self.write_archived_rollout(
+            self.codex_home, "2020/01/02", "rollout-2020-01-02T10-00-00-archived.jsonl"
+        )
+        current = self.write_rollout(
+            self.codex_home, "2099/01/01", "rollout-2099-01-01T10-00-00-new.jsonl"
+        )
+
+        code, output = self.output(["sessions", "purge"])
+
+        self.assertEqual(code, 0)
+        confirm.assert_called_once()
+        self.assertIn("Permanently deleted 2 transcript paths", output)
+        self.assertFalse(session.exists())
+        self.assertFalse(archived.exists())
+        self.assertTrue(current.exists())
+
+    @patch("builtins.input", return_value="no")
+    def test_purge_cancels_without_the_exact_confirmation(self, confirm):
+        session = self.write_rollout(
+            self.codex_home, "2020/01/01", "rollout-2020-01-01T10-00-00-old.jsonl"
+        )
+
+        code, output = self.output(["sessions", "purge"])
+
+        self.assertEqual(code, 0)
+        confirm.assert_called_once()
+        self.assertIn("Purge cancelled", output)
+        self.assertTrue(session.exists())
+
+    @patch("builtins.input", side_effect=KeyboardInterrupt)
+    def test_purge_ctrl_c_cancels_without_a_traceback(self, confirm):
+        session = self.write_rollout(
+            self.codex_home, "2020/01/01", "rollout-2020-01-01T10-00-00-old.jsonl"
+        )
+
+        code, output = self.output(["sessions", "purge"])
+
+        self.assertEqual(code, 130)
+        confirm.assert_called_once()
+        self.assertIn("Purge cancelled", output)
+        self.assertTrue(session.exists())
+
+    def test_purge_rejects_a_non_positive_retention_window(self):
+        code, _ = self.output(["sessions", "purge", "--older-than", "0"])
+        self.assertEqual(code, 2)
 
     @patch("super_agent.cli.reconcile_session_names", return_value=0)
     def test_merge_unifies_the_backlog(self, names):

@@ -181,6 +181,19 @@ def parser():
         "exclude", help="Keep asset groups per account"
     )
     sessions_exclude.add_argument("groups", nargs="+", choices=SHARING_GROUPS)
+    sessions_purge = session_commands.add_parser(
+        "purge", help="Preview and permanently remove old Codex transcripts"
+    )
+    sessions_purge.add_argument(
+        "--older-than",
+        type=int,
+        default=15,
+        metavar="DAYS",
+        help="Purge transcripts older than this many days (default: 15)",
+    )
+    sessions_purge.add_argument(
+        "--dry-run", action="store_true", help="Preview without asking or deleting"
+    )
 
     login = commands.add_parser("login", help="Run the provider's native login flow")
     add_selection_arguments(login)
@@ -761,7 +774,64 @@ def run_sessions(store, config, args):
         )
         print(f"Shared with every account: {', '.join(groups) or 'nothing'}")
         return 0
+    if command == "purge":
+        candidates, cutoff = store.purge_candidates(config, args.older_than)
+        if not candidates:
+            print(
+                f"No Codex transcripts older than {args.older_than} days "
+                f"(before {cutoff:%Y-%m-%d %H:%M:%S})."
+            )
+            return 0
+        categories = {"sessions": 0, "archived_sessions": 0}
+        unique_transcripts = {}
+        for candidate in candidates:
+            categories[candidate["directory"]] += 1
+            unique_transcripts[(candidate["device"], candidate["inode"])] = candidate[
+                "size"
+            ]
+        print(
+            f"Would permanently delete {len(candidates)} transcript paths "
+            f"({len(unique_transcripts)} unique transcripts) older than {args.older_than} days "
+            f"(before {cutoff:%Y-%m-%d %H:%M:%S})."
+        )
+        print(f"  sessions:          {categories['sessions']}")
+        print(f"  archived_sessions: {categories['archived_sessions']}")
+        reclaimable = sum(unique_transcripts.values())
+        print(f"  Reclaimable storage: {format_byte_count(reclaimable)}")
+        roots = sorted({candidate["root"] for candidate in candidates}, key=os.fspath)
+        print("\nAffected locations (matching rollout files only):")
+        for root in roots:
+            print(f"  {root}/*")
+        if args.dry_run:
+            print("\nNothing was deleted.")
+            return 0
+        try:
+            confirmation = input("\nType PURGE to permanently delete these transcripts: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nPurge cancelled. Nothing was deleted.")
+            return 130
+        if confirmation != "PURGE":
+            print("Purge cancelled. Nothing was deleted.")
+            return 0
+        deleted = store.purge_transcripts(candidates)
+        print(
+            f"Permanently deleted {deleted} transcript paths "
+            f"({len(unique_transcripts)} unique transcripts)."
+        )
+        return 0
     raise ConfigError(f"Unsupported sessions command: {command}")
+
+
+def format_byte_count(value):
+    """Render an exact byte count with a compact binary-unit estimate."""
+    if value < 1024:
+        return f"{value} bytes"
+    units = ("KiB", "MiB", "GiB", "TiB")
+    estimate = float(value)
+    for unit in units:
+        estimate /= 1024
+        if estimate < 1024 or unit == units[-1]:
+            return f"{estimate:.1f} {unit} ({value:,} bytes)"
 
 
 def run_bindings(config, agent_filter=None, json_output=False):

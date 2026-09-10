@@ -59,6 +59,14 @@ Prefer to skip the picker? Run `sc config mode main` to launch the project's def
 
 Session sharing lets you continue work with another account. Avoid opening the same session from two accounts at once, since both would write to the same transcript.
 
+To remove old Codex history, preview the default 15-day retention window first:
+
+```bash
+sc sessions purge --dry-run
+```
+
+Run `sc sessions purge` to review the affected session directories and type `PURGE` before deletion. It covers both active and archived sessions. Use `--older-than DAYS` to choose a different retention window.
+
 ## Ask Claude for a review
 
 Inside a Codex session launched with `sc`, ask:

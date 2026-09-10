@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-09-10
+
+### Added
+
+- `sc sessions purge` previews and, after typed confirmation, permanently removes Codex
+  session and archived-session transcripts older than 15 days by default. Use
+  `--older-than DAYS` to choose the retention window or `--dry-run` to preview only.
+
 ## [0.9.1] - 2026-09-10
 
 ### Fixed

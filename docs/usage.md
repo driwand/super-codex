@@ -463,7 +463,14 @@ sc sessions merge               # unify them
 sc sessions split --profile 2   # keep account 2's future sessions to itself
 sc sessions share --profile 2   # put it back
 sc sessions sync                # reconcile immediately instead of waiting for launch or exit
+sc sessions purge --dry-run     # list sessions and archives older than 15 days
+sc sessions purge --older-than 30
 ```
+
+`sc sessions purge` lists each affected session-directory root, separates active and archived
+totals, and asks you to type `PURGE` before it changes anything. It considers only owned
+regular Codex rollout files and removes every configured account path, including shared hard
+links. Use `--dry-run` to preview without a confirmation prompt.
 
 The store is the shared Codex home, normally `~/.codex`, which is why a bare `codex`
 sees the same history. Sharing costs no disk space: a shared transcript is one file with
