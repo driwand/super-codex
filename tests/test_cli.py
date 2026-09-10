@@ -67,6 +67,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("profiles/codex/2", env["CODEX_HOME"])
         self.assertEqual(cwd, str(Path.cwd().resolve()))
 
+    @patch("super_agent.cli.run_update", return_value=0)
+    def test_upd_is_an_update_alias(self, run_update):
+        code, _ = self.output(["upd"])
+        self.assertEqual(code, 0)
+        run_update.assert_called_once_with(False, None)
+
     def test_profile_add_overrides_existing_profile_only_after_successful_login(self):
         self.add_account_2()
         original_home = self.state / "profiles" / "codex" / "2"

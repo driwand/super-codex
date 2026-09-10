@@ -8,6 +8,7 @@
 - Never add automatic dangerous or permission-bypass flags to delegated commands.
 - Keep configuration schema-versioned, private, symlink-resistant, and atomically written.
 - Do not implement automatic account rotation for bypassing provider limits.
+- Use semantic versioning: ship fixes and documentation-only changes as patch releases (for example, `0.9.1`). Reserve minor-version increments (for example, `0.10.0`) for substantial new user-facing capability or a deliberate compatibility change.
 - Run `python3 -m unittest discover -s tests -v` after code changes.
 - Run `python3 -m compileall -q src tests` to catch syntax errors.
 - Verify both installed entry points when packaging changes: `sc --version` and `super-codex --version`.

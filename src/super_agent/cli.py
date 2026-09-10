@@ -934,6 +934,8 @@ def run_doctor(store, config, cwd, live):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "upd":
+        argv[0] = "update"
     bare_invocation = not argv
     main_shorthand = bool(argv and argv[0] == "main")
     if main_shorthand:

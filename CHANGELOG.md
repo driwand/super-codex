@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-09-10
+
+### Fixed
+
+- `sc upd` is now a supported shorthand for `sc update`.
+
 ## [0.9.0] - 2026-09-08
 
 ### Changed
