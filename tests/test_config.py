@@ -646,7 +646,53 @@ class SessionSharingTests(unittest.TestCase):
         destination = account / "sessions" / "2026" / "09" / "06" / shared.name
         self.assertFalse(destination.exists())
 
-    def test_transcript_sharing_refuses_an_existing_conflicting_file(self):
+    def test_transcript_sharing_leaves_an_existing_conflicting_file_alone(self):
+        shared = self.write_rollout(
+            self.codex_home,
+            "2026/09/06",
+            "rollout-2026-09-06T10-00-00-aaa.jsonl",
+            "shared",
+        )
+        account = self.account_home()
+        conflicting = self.write_rollout(
+            account, "2026/09/06", shared.name, "account"
+        )
+        conflicts = []
+
+        linked = self.store._link_session_tree(
+            self.codex_home / "sessions",
+            account / "sessions",
+            conflicts=conflicts,
+        )
+
+        self.assertEqual(linked, 0)
+        self.assertEqual(conflicts, [conflicting])
+        self.assertEqual(conflicting.read_text(encoding="utf-8"), "account")
+        self.assertEqual(shared.read_text(encoding="utf-8"), "shared")
+
+    def test_one_conflicting_transcript_keeps_the_others_shared(self):
+        shared = self.write_rollout(
+            self.codex_home,
+            "2026/09/06",
+            "rollout-2026-09-06T10-00-00-aaa.jsonl",
+            "shared",
+        )
+        other = self.write_rollout(
+            self.codex_home,
+            "2026/09/06",
+            "rollout-2026-09-06T12-00-00-ccc.jsonl",
+            "other",
+        )
+        account = self.account_home()
+        self.write_rollout(account, "2026/09/06", shared.name, "account")
+
+        env = self.store.environment("codex", "2", self.config)
+
+        self.assertEqual(env["CODEX_HOME"], str(account))
+        linked = account / "sessions" / "2026" / "09" / "06" / other.name
+        self.assertEqual(linked.stat().st_ino, other.stat().st_ino)
+
+    def test_status_counts_the_transcripts_kept_apart(self):
         shared = self.write_rollout(
             self.codex_home,
             "2026/09/06",
@@ -658,12 +704,10 @@ class SessionSharingTests(unittest.TestCase):
             account, "2026/09/06", shared.name, "account"
         )
 
-        with self.assertRaisesRegex(ConfigError, "conflicting shared Codex asset"):
-            self.store._link_session_tree(
-                self.codex_home / "sessions", account / "sessions"
-            )
+        rows = self.store.sessions_status(self.config)
 
-        self.assertEqual(conflicting.read_text(encoding="utf-8"), "account")
+        conflicts = [path for row in rows for path in row["conflicts"]]
+        self.assertEqual(conflicts, [conflicting])
 
     def test_reconciling_twice_changes_nothing(self):
         shared = self.write_rollout(

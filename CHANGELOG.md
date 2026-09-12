@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-09-12
+
+### Fixed
+
+- A transcript that exists in both the shared store and an account home as two separate
+  files no longer makes the whole account unusable. Codex rewrites a rollout in place when
+  it migrates one to a newer on-disk format, which breaks the hard link the two homes
+  shared; sharing now leaves both copies untouched, reconciles every other transcript, and
+  reports the count in `sc sessions status` instead of refusing the account.
+- The account picker keeps one status line per account. A failed usage reading used to be
+  printed verbatim, and Codex quotes the entire HTTP response body, so a single expired
+  token scrolled the other accounts off the screen. An expired token now reads as the
+  refresh it is, since Super Codex reads usage without refreshing the token and Codex
+  refreshes it when the account next runs.
+
 ## [0.9.3] - 2026-09-10
 
 ### Fixed

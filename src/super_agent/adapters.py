@@ -34,6 +34,7 @@ CODEX_TUI_STATUS_LINE = (
     "git-branch",
     "current-dir",
 )
+DETAIL_LIMIT = 140
 from .config import ConfigError, ensure_private_directory
 
 
@@ -51,6 +52,28 @@ class LiveStatus:
 
 class AdapterError(RuntimeError):
     pass
+
+
+def summarize_failure(error):
+    """Reduce one failure to a single short line fit for the account picker.
+
+    Codex reports a failed usage call by quoting the entire HTTP response, body
+    included, which runs to a dozen lines of JSON. The picker draws one row per
+    line, so the raw text pushes every other account off the screen.
+    """
+    text = " ".join(str(error).split())
+    if not text:
+        return "unknown error"
+    lowered = text.lower()
+    if "token_expired" in lowered or "authentication token is expired" in lowered:
+        # Usage is read without refreshing the token, so an expired one stops the
+        # reading and nothing else: Codex refreshes it when the account runs.
+        return "sign-in token expired; it refreshes when this account next runs"
+    if "401 unauthorized" in lowered or "403 forbidden" in lowered:
+        return "the provider rejected this account's credentials"
+    if len(text) > DETAIL_LIMIT:
+        return text[: DETAIL_LIMIT - 1].rstrip() + "\u2026"
+    return text
 
 
 def executable(agent):

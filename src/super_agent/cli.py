@@ -23,6 +23,7 @@ from .adapters import (
     executable,
     format_codex_live,
     run_command,
+    summarize_failure,
     version,
 )
 from .config import (
@@ -277,6 +278,21 @@ def launcher_command():
     return "super-codex"
 
 
+def _report_conflicts(reports):
+    """Say how many transcripts exist in both homes as separate files.
+
+    Sharing skips them rather than choosing a winner, so the count is the only
+    way a user learns those two homes hold that session independently.
+    """
+    total = sum(len(report["conflicts"]) for report in reports)
+    if total:
+        print(
+            f"{total} transcripts exist separately in both homes and were left "
+            "as they are. See: sc sessions status"
+        )
+    return total
+
+
 def _profile_row(store, config, agent, name, live):
     data = config["profiles"][agent][name]
     row = {
@@ -294,7 +310,7 @@ def _profile_row(store, config, agent, name, live):
         env = store.environment(agent, name, config)
         status = auth_status(agent, env)
     except ConfigError as exc:
-        row["authDetail"] = f"profile unavailable: {exc}"
+        row["authDetail"] = f"profile unavailable: {summarize_failure(exc)}"
         row["error"] = str(exc)
         return row
     row["authenticated"] = status.authenticated
@@ -306,7 +322,7 @@ def _profile_row(store, config, agent, name, live):
             row["live"] = format_codex_live(live_status)
             row["exhausted"] = codex_limits_exhausted(live_status)
         except AdapterError as exc:
-            row["live"] = [f"usage unavailable: {exc}"]
+            row["live"] = [f"usage unavailable: {summarize_failure(exc)}"]
     return row
 
 
@@ -399,7 +415,10 @@ def _picker_lines(rows, selected_index):
         lines.append(f"{marker} {row['profile']:<4} {row['label']}{main}  [{state}]")
         details = row["live"] or ([row["authDetail"]] if row["authDetail"] else [])
         for detail in details:
-            lines.append(f"      {detail}")
+            # One detail is one row. A detail that reached here with newlines in
+            # it would redraw the picker over several lines and scroll the
+            # accounts below it out of view.
+            lines.append("      " + " ".join(str(detail).split()))
     return lines
 
 
@@ -731,6 +750,7 @@ def run_sessions(store, config, args):
         print(f"Includes: {', '.join(store.session_sharing_groups(config)) or 'nothing'}")
         print()
         pending = 0
+        conflicts = 0
         for row in rows:
             note = "store" if not row["isolated"] else row["mode"]
             print(f"  {row['profile']:<6} {row['label']:<18} {note}")
@@ -738,12 +758,27 @@ def run_sessions(store, config, args):
             if row["pending"]:
                 detail += f", {row['pending']} not unified"
                 pending += row["pending"]
+            if row["conflicts"]:
+                detail += f", {len(row['conflicts'])} kept apart"
+                conflicts += len(row["conflicts"])
             print(f"         {detail}")
         if pending:
             print(
                 f"\n{pending} transcripts predate sharing. Preview with: "
                 "sc sessions merge --dry-run"
             )
+        if conflicts:
+            print(
+                f"\n{conflicts} transcripts exist in both homes as separate "
+                "files, usually because Codex rewrote one copy in place. Each "
+                "home keeps the copy it has and both stay readable; sharing "
+                "skips them rather than choosing a winner."
+            )
+            listed = [entry for row in rows for entry in row["conflicts"]]
+            for entry in listed[:10]:
+                print(f"  {entry}")
+            if len(listed) > 10:
+                print(f"  ... and {len(listed) - 10} more")
         return 0
     if command == "merge":
         reports = store.merge_sessions(
@@ -756,6 +791,7 @@ def run_sessions(store, config, args):
                 print(f"  {report['profile']}: {moved} transcripts")
         if args.dry_run:
             print(f"Would unify {total} transcripts. Nothing was written.")
+            _report_conflicts(reports)
             return 0
         names = reconcile_session_names(store, config, args.profile)
         configs = sum(len(report["config"]) for report in reports)
@@ -766,6 +802,7 @@ def run_sessions(store, config, args):
                 "They cost no extra disk space: each is one file with a name in "
                 "every account."
             )
+        _report_conflicts(reports)
         return 0
     if command in ("share", "split"):
         mode = "shared" if command == "share" else "isolated"
@@ -790,6 +827,7 @@ def run_sessions(store, config, args):
             f"Reconciled {total} transcripts, synchronized {names} session names, "
             f"and refreshed {configs} configuration files."
         )
+        _report_conflicts(reports)
         return 0
     if command in ("include", "exclude"):
         groups = store.set_session_groups(

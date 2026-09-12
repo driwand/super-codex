@@ -21,7 +21,31 @@ from super_agent.adapters import (
     exec_command,
     format_codex_live,
     run_command,
+    summarize_failure,
 )
+
+
+class FailureSummaryTests(unittest.TestCase):
+    def test_an_expired_token_reads_as_a_refresh_not_a_failure(self):
+        message = (
+            "failed to fetch codex rate limits: GET https://example.test/usage "
+            'failed: 401 Unauthorized; content-type=text/plain; body={\n'
+            '  "error": {\n    "code": "token_expired"\n  }\n}'
+        )
+        summary = summarize_failure(AdapterError(message))
+        self.assertEqual(
+            summary, "sign-in token expired; it refreshes when this account next runs"
+        )
+
+    def test_an_unrecognised_failure_stays_one_short_line(self):
+        summary = summarize_failure(AdapterError("broke\nin\ntwo places " + "x" * 400))
+        self.assertNotIn("\n", summary)
+        self.assertLessEqual(len(summary), 140)
+        self.assertTrue(summary.startswith("broke in two places"))
+
+    def test_a_short_failure_is_passed_through(self):
+        self.assertEqual(summarize_failure(AdapterError("codex is not installed")),
+                         "codex is not installed")
 
 
 class CommandTests(unittest.TestCase):

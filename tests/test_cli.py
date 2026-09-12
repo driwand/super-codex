@@ -454,6 +454,32 @@ class CliTests(unittest.TestCase):
         self.assertIn("me@example.com", rendered)
         self.assertIn("5h: 25% used", rendered)
 
+    def test_picker_keeps_one_account_detail_on_one_line(self):
+        lines = _picker_lines(
+            [
+                {
+                    "profile": "main",
+                    "label": "Work",
+                    "main": True,
+                    "authenticated": True,
+                    "authDetail": "",
+                    "live": ['401 Unauthorized; body={\n "code": "token_expired"\n}'],
+                },
+                {
+                    "profile": "2",
+                    "label": "Second",
+                    "main": False,
+                    "authenticated": True,
+                    "authDetail": "",
+                    "live": ["account: me@example.com"],
+                },
+            ],
+            0,
+        )
+        self.assertEqual(len(lines), 7)
+        self.assertIn("Second", lines[-2])
+        self.assertTrue(all("\n" not in line for line in lines))
+
     def test_picker_marks_a_drained_account(self):
         lines = _picker_lines(
             [{

@@ -751,7 +751,9 @@ class Store:
                 f"Cannot replace Codex session link {destination}: {exc}"
             ) from exc
 
-    def _link_session_tree(self, source, destination, cutoff=None, dry_run=False, ensure=None):
+    def _link_session_tree(
+        self, source, destination, cutoff=None, dry_run=False, ensure=None, conflicts=None
+    ):
         """Hard link every transcript under `source` into `destination`.
 
         Codex canonicalizes rollout paths and refuses any that resolve outside
@@ -766,6 +768,12 @@ class Store:
         once something is actually linked into them, so a filtered day leaves no
         empty shell behind. Returns the number of files linked, or that would be
         linked under `dry_run`.
+
+        A name that already exists on both sides as a separate file is left
+        exactly as it stands and appended to `conflicts` when one is given. Codex
+        breaks a link by rewriting a rollout in place, neither copy is ours to
+        discard, and one rewritten transcript must not cost the account every
+        other transcript it could still share.
         """
         source = absolute_path(source)
         destination = Path(destination)
@@ -803,7 +811,12 @@ class Store:
             child = destination / entry.name
             if entry.is_dir():
                 linked += self._link_session_tree(
-                    source / entry.name, child, cutoff, dry_run, ensure_destination
+                    source / entry.name,
+                    child,
+                    cutoff,
+                    dry_run,
+                    ensure_destination,
+                    conflicts,
                 )
                 continue
             if not entry.is_file() or not self._within_cutoff(entry.name, cutoff):
@@ -836,14 +849,16 @@ class Store:
                     and destination_status.st_ino == source_file_status.st_ino
                 ):
                     continue
-                raise ConfigError(f"Refusing conflicting shared Codex asset: {child}")
+                if conflicts is not None:
+                    conflicts.append(child)
+                continue
             if dry_run:
                 linked += 1
                 continue
             ensure_destination()
             try:
                 os.link(entry.path, os.fspath(child), follow_symlinks=False)
-            except FileExistsError as exc:
+            except FileExistsError:
                 try:
                     raced_status = child.lstat()
                 except OSError as inspect_exc:
@@ -855,9 +870,8 @@ class Store:
                     and raced_status.st_dev == source_file_status.st_dev
                     and raced_status.st_ino == source_file_status.st_ino
                 ):
-                    raise ConfigError(
-                        f"Refusing conflicting shared Codex asset: {child}"
-                    ) from exc
+                    if conflicts is not None:
+                        conflicts.append(child)
                 continue
             except OSError as exc:
                 raise ConfigError(
@@ -923,13 +937,17 @@ class Store:
         store, because Codex rewrites `config.toml` whenever a setting changes and
         a hard link would silently break. `auth.json` is never read, copied, or
         linked: it is what keeps the accounts separate.
+
+        `conflicts` lists the transcripts that carry one name over two different
+        files; they stay private to the home that holds them.
         """
         home = absolute_path(home)
         shared_home = absolute_path(shared_home)
-        report = {"pulled": 0, "pushed": 0, "config": []}
+        report = {"pulled": 0, "pushed": 0, "config": [], "conflicts": []}
         if home == shared_home:
             return report
         groups = self.session_sharing_groups(config)
+        conflicts = report["conflicts"]
         cutoff = None if ignore_cutoff else local_cutoff(
             self.session_sharing(config).get("since")
         )
@@ -937,8 +955,10 @@ class Store:
             if name not in groups:
                 continue
             report["pulled"] += self._link_session_tree(
-                shared_home / name, home / name, cutoff, dry_run
+                shared_home / name, home / name, cutoff, dry_run, conflicts=conflicts
             )
+            # A divergence is symmetric, so the pull above has already recorded
+            # every name this push would report a second time.
             report["pushed"] += self._link_session_tree(
                 home / name, shared_home / name, cutoff, dry_run
             )
@@ -1240,11 +1260,13 @@ class Store:
             entry["store"] = shared_home
             entry["rollouts"] = self.count_rollouts(row["home"])
             entry["pending"] = 0
+            entry["conflicts"] = []
             if row["isolated"] and row["mode"] == "shared":
                 report = self.sync_codex_home(
                     row["home"], shared_home, config, dry_run=True, ignore_cutoff=True
                 )
                 entry["pending"] = report["pulled"] + report["pushed"]
+                entry["conflicts"] = report["conflicts"]
             rows.append(entry)
         return rows
 

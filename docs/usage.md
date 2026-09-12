@@ -479,6 +479,13 @@ filesystem; if they are not, Super Codex fails without creating a divergent copy
 is ever deleted, and `sc sessions split` stops future sharing without unlinking what an
 account can already see, because removing a link could remove the only remaining copy.
 
+A link breaks when Codex rewrites a transcript in place rather than appending to it,
+which it does when it migrates an older rollout to a newer on-disk format. Both homes
+then hold that session as separate files under one name. Neither copy is Super Codex's
+to discard, so sharing leaves both alone, keeps working on every other transcript, and
+counts them in `sc sessions status` as `kept apart`. Resolving one means removing or
+renaming a copy yourself.
+
 Upgrading an existing installation shares sessions recorded from that point on and
 leaves the earlier ones where they are, so an upgrade does not silently reshape your
 resume picker. `sc sessions status` reports how many are waiting, and one `sc sessions
