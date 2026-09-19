@@ -1203,6 +1203,37 @@ class SessionsCliTests(unittest.TestCase):
         )
         self.assertEqual(adopted.stat().st_ino, transcript.stat().st_ino)
 
+    @patch("super_agent.cli.interactive_terminal", return_value=True)
+    def test_resume_without_a_profile_lets_the_user_select_the_account(self, terminal):
+        self.add_account_2()
+        account = self.account_home()
+        self.output(["sessions", "split", "--profile", "2"])
+        transcript = self.write_rollout(
+            self.codex_home,
+            "2026/09/07",
+            "rollout-2026-09-07T08-00-00-picker.jsonl",
+        )
+        rows = [
+            {"agent": "codex", "profile": "main"},
+            {"agent": "codex", "profile": "2"},
+        ]
+        with patch("super_agent.cli.profile_rows", return_value=rows), patch(
+            "super_agent.cli.choose_profile", return_value="2"
+        ) as choose, patch("super_agent.cli.exec_command", return_value=0) as execute:
+            code, output = self.output(["resume", "picker"])
+        self.assertEqual(code, 0)
+        choose.assert_called_once()
+        self.assertIn("Adopted", output)
+        self.assertEqual(execute.call_args.args[1]["CODEX_HOME"], str(account))
+        adopted = account / "sessions" / "2026" / "09" / "07" / transcript.name
+        self.assertEqual(adopted.stat().st_ino, transcript.stat().st_ino)
+
+    def test_resume_without_a_profile_keeps_working_in_a_noninteractive_shell(self):
+        with patch("super_agent.cli.exec_command", return_value=0) as execute:
+            code, _ = self.output(["resume", "noninteractive"])
+        self.assertEqual(code, 0)
+        self.assertEqual(execute.call_args.args[1]["CODEX_HOME"], str(self.codex_home))
+
     def test_resume_leaves_a_known_session_alone(self):
         self.add_account_2()
         self.write_rollout(

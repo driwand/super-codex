@@ -494,6 +494,11 @@ def choose_profile(rows, input_stream=None, output_stream=None, initial_profile=
         output_stream.flush()
 
 
+def interactive_terminal():
+    """Return whether an account picker can safely read a terminal."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def print_rows(rows, active=None):
     for row in rows:
         marker = "*" if active == (row["agent"], row["profile"]) else " "
@@ -1110,11 +1115,21 @@ def main(argv=None):
                 agent, profile = "codex", config["agentDefaults"]["codex"]
             elif bare_invocation:
                 agent, profile, _ = store.selection(config, cwd)
-            if (
-                bare_invocation
-                and config["startupMode"] == "select"
+            else:
+                agent, profile, _ = selected(store, config, args, cwd)
+            resume_needs_profile = (
+                args.command == "resume"
                 and agent == "codex"
-            ):
+                and not getattr(args, "profile", None)
+            )
+            show_account_picker = (
+                (
+                    bare_invocation
+                    and config["startupMode"] == "select"
+                )
+                or resume_needs_profile
+            ) and agent == "codex"
+            if show_account_picker and (bare_invocation or interactive_terminal()):
                 targets = {
                     ("codex", name) for name in store.ordered_profile_names(config, "codex")
                 }
@@ -1128,10 +1143,6 @@ def main(argv=None):
                 if profile is None:
                     print("Account selection cancelled.")
                     return 130
-            elif not bare_invocation and (
-                not main_shorthand or args.agent or args.profile
-            ):
-                agent, profile, _ = selected(store, config, args, cwd)
             env = store.environment(agent, profile, config)
             provider, _ = store.provider_selection(
                 config, cwd, getattr(args, "provider", None)

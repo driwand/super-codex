@@ -209,10 +209,16 @@ sc resume --profile 2
 sc resume --profile 2 --last
 ```
 
+In an interactive terminal, `sc resume` without `--profile` opens the live account
+picker first. Choose the account with available credits; this is always an explicit
+choice, never automatic account rotation. In scripts and other non-interactive shells,
+it retains the workspace/default account unless you pass `--profile`.
+
 With sharing on, any account resumes any session, so `--profile` selects which account
 pays for the next turn rather than which history you can reach. If the id belongs to an
 account you have deliberately split off, `sc resume` finds that transcript and links it
-into the account you are launching.
+into the account you are launching, making it available to that account's native resume
+picker after the launch.
 
 Do not resume the exact same session concurrently from two accounts; both processes would append to the same local transcript.
 

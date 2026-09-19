@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-09-19
+
+### Fixed
+
+- `sc resume` now shows the live Codex account picker before an interactive resume
+  when no profile is specified. Selecting an account remains explicit, and the requested
+  transcript is linked into that account before Codex opens it. Non-interactive invocations
+  keep their existing workspace/default selection unless `--profile` is supplied.
+
 ## [0.9.4] - 2026-09-12
 
 ### Fixed
