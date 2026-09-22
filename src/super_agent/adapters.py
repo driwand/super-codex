@@ -14,7 +14,12 @@ from . import __version__
 CLAUDE_ROUTING_INSTRUCTIONS = (
     "When the user asks to use, ask, consult, or have Claude review anything, call the "
     "super_codex_claude.ask_claude MCP tool immediately and exactly once. Put the "
-    "user's request directly in the tool's request field. For current changes, diffs, "
+    "user's request directly in the tool's request field. If they name a Claude model, "
+    "map it to the corresponding Claude Code model ID and pass it as model (for example, "
+    "Opus 5.5 -> claude-opus-5-5); otherwise rely on Super Codex's configured model default. "
+    "If they name a thinking effort such as low, medium, high, xhigh, or max, pass it as "
+    "effort. Preserve the requested model and effort in your explanation of the result. "
+    "For current changes, diffs, "
     "staged, or uncommitted work, set "
     "include_diff=true. Fast responses return directly; otherwise monitor the returned "
     "job with super_codex_claude.claude_job_status and never start a replacement. Use "

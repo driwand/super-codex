@@ -333,6 +333,17 @@ launched agent. Session history is shared by default; see below.
 
 Every Codex command launched through `sc` receives an ephemeral MCP configuration override for Super Codex's local STDIO server. This does not edit `~/.codex/config.toml`. Inside Codex, `/mcp` shows `super_codex_claude`, and Codex calls its `ask_claude` tool when you explicitly ask Claude or request a cross-model review. The server is marked required so a failed MCP startup is reported instead of silently falling back to shell probing.
 
+Consultations default to Claude Opus 5.5 (`claude-opus-5-5`); set
+`SUPER_CODEX_CLAUDE_MODEL` in the environment used to launch `sc` to choose another default.
+When you name a model, Codex passes its Claude Code model ID through the MCP `model`
+argument. You can also specify `effort` per consultation using `low`, `medium`, `high`,
+`xhigh`, or `max`; the default effort is `low`, with `SUPER_CODEX_CLAUDE_EFFORT` as the
+environment override. The MCP response identifies the requested model, the model ID or
+IDs Claude Code reports, and the effort. If Claude Code does not emit a model ID, the
+response says so and shows the requested ID. For example,
+“consult Claude Opus 5.5 with xhigh effort” selects `model="claude-opus-5-5"` and
+`effort="xhigh"`.
+
 The consultation runs `claude -p` with the prompt over standard input. Only Claude's read-only `Read`, `Glob`, and `Grep` tools are enabled. No permission-bypass flags are added, and Claude's output is treated as untrusted advisory text rather than an instruction to edit automatically.
 
 Each request is a managed in-memory job. Super Codex waits up to 10 seconds for a fast
@@ -383,6 +394,7 @@ Other resource controls remain deliberately bounded:
 
 | Control | Default | Override |
 | --- | --- | --- |
+| Claude model | `claude-opus-5-5` | `SUPER_CODEX_CLAUDE_MODEL` or per-call `model` |
 | Claude output per model response | 4,096 tokens | `SUPER_CODEX_CLAUDE_MAX_OUTPUT_TOKENS` (512-16,384) |
 | Claude dollar budget | none | explicit `max_budget_usd` or `SUPER_CODEX_CLAUDE_MAX_BUDGET_USD` (0.01-10) |
 | Claude effort | `low` | `SUPER_CODEX_CLAUDE_EFFORT` (`low` through `max`) |

@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-22
+
+### Added
+
+- Claude consultations now default to Opus 5.5, accept per-call model and thinking-effort
+  selections, and report requested and CLI-reported model IDs and effort in MCP results.
+
 ## [0.9.5] - 2026-09-19
 
 ### Fixed

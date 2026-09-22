@@ -64,6 +64,10 @@ class McpProtocolTests(unittest.TestCase):
         self.assertEqual(tool["name"], "ask_claude")
         self.assertEqual(tool["inputSchema"]["required"], ["request"])
         self.assertIn("request", tool["inputSchema"]["properties"])
+        self.assertEqual(
+            tool["inputSchema"]["properties"]["effort"]["enum"],
+            ["low", "medium", "high", "xhigh", "max"],
+        )
         self.assertTrue(tool["annotations"]["readOnlyHint"])
         self.assertFalse(tool["annotations"]["destructiveHint"])
         self.assertEqual(
@@ -90,6 +94,54 @@ class McpProtocolTests(unittest.TestCase):
         self.assertFalse(response["result"]["isError"])
         self.assertEqual(response["result"]["content"][0]["text"], "Independent review")
         consult.assert_called_once_with(self.store, "/repo", "Review this", model="sonnet")
+
+    def test_completed_job_response_identifies_model_and_effort(self):
+        manager = Mock()
+        manager.start.return_value = {
+            "state": "completed",
+            "model": "claude-opus-5-5",
+            "requested_model": "claude-opus-5-5",
+            "model_source": "claude_cli",
+            "effort": "xhigh",
+            "result": "Reviewed",
+        }
+        response = handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 33,
+                "method": "tools/call",
+                "params": {
+                    "name": TOOL_NAME,
+                    "arguments": {"request": "Review", "effort": "xhigh"},
+                },
+            },
+            self.store,
+            "/repo",
+            job_manager=manager,
+        )
+        text = response["result"]["content"][0]["text"]
+        self.assertIn("Claude model(s) reported by Claude Code: claude-opus-5-5", text)
+        self.assertIn("effort: xhigh", text)
+        self.assertTrue(text.endswith("Reviewed"))
+
+    def test_invalid_effort_is_rejected_before_starting_consultation(self):
+        consult = Mock()
+        response = handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 30,
+                "method": "tools/call",
+                "params": {
+                    "name": TOOL_NAME,
+                    "arguments": {"request": "Review this", "effort": "extreme"},
+                },
+            },
+            self.store,
+            "/repo",
+            consult=consult,
+        )
+        self.assertIn("effort must be", response["error"]["message"])
+        consult.assert_not_called()
 
     def test_legacy_prompt_argument_remains_supported(self):
         consult = Mock(return_value="Independent review")
@@ -336,6 +388,35 @@ class ClaudeJobManagerTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], EXECUTION_PROFILES["standard"]["timeout_seconds"])
         self.assertEqual(captured["max_turns"], EXECUTION_PROFILES["standard"]["max_turns"])
         self.assertIsNone(captured["max_budget_usd"])
+        self.assertEqual(captured["model"], "claude-opus-5-5")
+        self.assertEqual(captured["effort"], "low")
+        self.assertEqual(result["model"], "claude-opus-5-5")
+        self.assertEqual(result["model_source"], "requested")
+        self.assertEqual(result["effort"], "low")
+
+    def test_explicit_model_and_effort_are_forwarded_and_reported(self):
+        captured = {}
+
+        def consult(store, cwd, prompt, **options):
+            captured.update(options)
+            options["progress_callback"](
+                {"type": "assistant", "message": {"model": "claude-opus-5-5"}}
+            )
+            return "Reviewed"
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = ClaudeJobManager(
+                self.store(directory), "/repo", consult=consult, detach_seconds=1
+            )
+            result = manager.start(
+                "Review", {"model": "claude-opus-5-5", "effort": "xhigh"}
+            )
+            manager.shutdown()
+        self.assertEqual(captured["model"], "claude-opus-5-5")
+        self.assertEqual(captured["effort"], "xhigh")
+        self.assertEqual(result["model"], "claude-opus-5-5")
+        self.assertEqual(result["model_source"], "claude_cli")
+        self.assertEqual(result["effort"], "xhigh")
 
     def test_explicit_limits_override_the_execution_profile(self):
         captured = {}
@@ -612,6 +693,39 @@ class ClaudeConsultTests(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertEqual(command[command.index("--max-turns") + 1], "7")
         self.assertEqual(command[command.index("--max-budget-usd") + 1], "1.25")
+
+    @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
+    @patch("super_agent.mcp_server.subprocess.Popen")
+    def test_explicit_model_and_effort_are_passed_to_claude_code(
+        self, popen, executable
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            popen.return_value = self.process()
+            run_claude_consult(
+                self.store(directory),
+                "/repo",
+                "Inspect",
+                model="claude-opus-5-5",
+                effort="xhigh",
+            )
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--model") + 1], "claude-opus-5-5")
+        self.assertEqual(command[command.index("--effort") + 1], "xhigh")
+
+    @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
+    @patch("super_agent.mcp_server.subprocess.Popen")
+    def test_medium_effort_is_passed_to_claude_code(self, popen, executable):
+        with tempfile.TemporaryDirectory() as directory:
+            popen.return_value = self.process()
+            run_claude_consult(
+                self.store(directory),
+                "/repo",
+                "Say hello",
+                model="claude-opus-5-5",
+                effort="medium",
+            )
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("--effort") + 1], "medium")
 
     @patch("super_agent.mcp_server.executable", return_value="/bin/claude")
     @patch("super_agent.mcp_server.subprocess.Popen")

@@ -30,6 +30,8 @@ DEFAULT_TIMEOUT_SECONDS = 90
 MAX_TIMEOUT_SECONDS = 1_800
 DEFAULT_MAX_OUTPUT_TOKENS = 4_096
 DEFAULT_EFFORT = "low"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EXECUTION_PROFILE = "standard"
 EXECUTION_PROFILES = {
     "quick": {"timeout_seconds": 60, "max_turns": 3},
@@ -59,6 +61,8 @@ class ClaudeJob:
         timeout_seconds,
         max_turns,
         max_budget_usd,
+        model,
+        effort,
     ):
         self.job_id = job_id
         self.profile = profile
@@ -66,6 +70,9 @@ class ClaudeJob:
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
         self.max_budget_usd = max_budget_usd
+        self.requested_model = model
+        self.effort = effort
+        self.reported_model = None
         self.created_at = _monotonic_timestamp()
         self.started_at = None
         self.completed_at = None
@@ -90,6 +97,12 @@ class ClaudeJob:
             cost = event.get("total_cost_usd")
             if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                 self.reported_cost_usd = float(cost)
+            message = event.get("message")
+            if isinstance(message, dict) and isinstance(message.get("model"), str):
+                self.reported_model = message["model"]
+            model_usage = event.get("modelUsage")
+            if isinstance(model_usage, dict) and model_usage:
+                self.reported_model = ", ".join(sorted(model_usage))
             self.condition.notify_all()
 
     def finish(self, state, result=None, error=None):
@@ -120,6 +133,10 @@ class ClaudeJob:
                 "timeout_seconds": self.timeout_seconds,
                 "max_turns": self.max_turns,
                 "activity_count": self.activity_count,
+                "model": self.reported_model or self.requested_model,
+                "requested_model": self.requested_model,
+                "model_source": "claude_cli" if self.reported_model else "requested",
+                "effort": self.effort,
             }
             if self.max_budget_usd is not None:
                 data["max_budget_usd"] = self.max_budget_usd
@@ -206,10 +223,17 @@ def _bounded_integer(value, name, minimum, maximum):
 
 def _effort_setting(env):
     value = env.get("SUPER_CODEX_CLAUDE_EFFORT", DEFAULT_EFFORT).lower()
-    if value not in ("low", "medium", "high", "xhigh", "max"):
+    if value not in CLAUDE_EFFORTS:
         raise AdapterError(
             "SUPER_CODEX_CLAUDE_EFFORT must be low, medium, high, xhigh, or max"
         )
+    return value
+
+
+def _model_setting(env):
+    value = env.get("SUPER_CODEX_CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL).strip()
+    if not value:
+        raise AdapterError("SUPER_CODEX_CLAUDE_MODEL must be a non-empty model name")
     return value
 
 
@@ -288,6 +312,25 @@ def _bounded_output(output):
         return output
     marker = "\n\n[Claude output truncated by Super Codex; ask for a narrower review.]"
     return output[: MAX_OUTPUT_CHARS - len(marker)].rstrip() + marker
+
+
+def _result_with_consultation_metadata(snapshot):
+    model = snapshot.get("model") or "not reported"
+    if snapshot.get("model_source") == "claude_cli":
+        model_label = "Claude model(s) reported by Claude Code"
+        requested = snapshot.get("requested_model")
+        if requested and requested not in model:
+            requested = f"; requested: {requested}"
+        else:
+            requested = ""
+    else:
+        model_label = "Claude model requested (CLI did not report a resolved model ID)"
+        requested = ""
+    effort = snapshot.get("effort") or "not reported"
+    return (
+        f"{model_label}: {model}{requested}; effort: {effort}\n\n"
+        f"{snapshot.get('result') or 'Claude returned no text.'}"
+    )
 
 
 @contextmanager
@@ -451,6 +494,7 @@ def run_claude_consult(
     session_registry=None,
     max_turns=None,
     max_budget_usd=None,
+    effort=None,
     profile=None,
     config=None,
     progress_callback=None,
@@ -493,7 +537,10 @@ def run_claude_consult(
         max_budget_usd = _budget_setting(env)
     else:
         max_budget_usd = _budget_value(max_budget_usd)
-    effort = _effort_setting(env)
+    effort = _effort_setting(env) if effort is None else effort
+    if effort not in CLAUDE_EFFORTS:
+        raise AdapterError("effort must be low, medium, high, xhigh, or max")
+    model = _model_setting(env) if model is None else model
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
     env["CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY"] = "1"
     command = [
@@ -512,8 +559,7 @@ def run_claude_consult(
         command.extend(["--max-turns", str(max_turns)])
     if max_budget_usd is not None:
         command.extend(["--max-budget-usd", f"{max_budget_usd:g}"])
-    if model:
-        command.extend(["--model", model])
+    command.extend(["--model", model])
     process = None
     stdout = ""
     stderr = ""
@@ -678,6 +724,10 @@ class ClaudeJobManager:
         execution_profile, timeout_seconds, max_turns, max_budget_usd = self._limits(
             arguments, env
         )
+        model = arguments.get("model") or _model_setting(env)
+        effort = arguments.get("effort") or _effort_setting(env)
+        if effort not in CLAUDE_EFFORTS:
+            raise AdapterError("effort must be low, medium, high, xhigh, or max")
         key = (self.cwd, profile)
         job = ClaudeJob(
             str(uuid.uuid4()),
@@ -686,6 +736,8 @@ class ClaudeJobManager:
             timeout_seconds,
             max_turns,
             max_budget_usd,
+            model,
+            effort,
         )
         with self._lock:
             self._cleanup_locked()
@@ -701,7 +753,8 @@ class ClaudeJobManager:
             self._active[key] = job.job_id
 
         options = {
-            "model": arguments.get("model"),
+            "model": model,
+            "effort": effort,
             "timeout": timeout_seconds,
             "cancel_event": job.cancel_event,
             "include_diff": arguments.get("include_diff", False),
@@ -813,8 +866,9 @@ def tool_definition():
         "name": TOOL_NAME,
         "description": (
             "Start exactly one managed, read-only Claude consultation. Fast results return "
-            "directly; work exceeding ten seconds continues as a background job. Pass the "
-            "user's request directly. Use quick or deep only when the user explicitly asks "
+            "directly; work exceeding ten seconds continues as a background job. The default "
+            "model is Opus 5.5; map explicitly named models and efforts to model and effort. "
+            "Pass the user's request directly. Use quick or deep only when the user explicitly asks "
             "for that execution depth, and set max_budget_usd only when the user explicitly "
             "specifies a dollar limit. Never retry a running or failed start automatically."
         ),
@@ -831,8 +885,19 @@ def tool_definition():
                 },
                 "model": {
                     "type": "string",
-                    "description": "Optional Claude model alias or full model name.",
+                    "description": (
+                        "Claude Code model alias or full model ID. Defaults to the configured "
+                        "SUPER_CODEX_CLAUDE_MODEL or claude-opus-5-5."
+                    ),
                     "minLength": 1,
+                },
+                "effort": {
+                    "type": "string",
+                    "enum": list(CLAUDE_EFFORTS),
+                    "description": (
+                        "Claude model effort for this consultation. Defaults to the configured "
+                        "SUPER_CODEX_CLAUDE_EFFORT or low."
+                    ),
                 },
                 "include_diff": {
                     "type": "boolean",
@@ -990,7 +1055,10 @@ def handle_request(
                 "instructions": (
                     "For an explicit request to ask or use Claude, call ask_claude exactly "
                     "once with the user's text. Fast results return directly; otherwise poll "
-                    "the returned job with claude_job_status. Never start a replacement job "
+                    "the returned job with claude_job_status. Pass explicitly named Claude "
+                    "models as model IDs (for example Opus 5.5 as claude-opus-5-5), and pass "
+                    "explicit effort such as high or xhigh in effort. If omitted, use the "
+                    "configured default model (Opus 5.5) and effort. Never start a replacement job "
                     "automatically. Use quick or deep only when explicitly requested, and "
                     "set max_budget_usd only when the user explicitly gives a dollar limit. "
                     "Set new_context=true only for an explicit fresh-context request. Claude "
@@ -1062,6 +1130,7 @@ def handle_request(
         prompt = arguments.get("request")
         legacy_prompt = arguments.get("prompt")
         model = arguments.get("model")
+        effort = arguments.get("effort")
         include_diff = arguments.get("include_diff")
         new_context = arguments.get("new_context")
         if prompt is None:
@@ -1076,6 +1145,12 @@ def handle_request(
             return _error(request_id, -32602, "request must be a non-empty string")
         if model is not None and (not isinstance(model, str) or not model.strip()):
             return _error(request_id, -32602, "model must be a non-empty string")
+        if effort is not None and effort not in CLAUDE_EFFORTS:
+            return _error(
+                request_id,
+                -32602,
+                "effort must be low, medium, high, xhigh, or max",
+            )
         if include_diff is not None and not isinstance(include_diff, bool):
             return _error(request_id, -32602, "include_diff must be a boolean")
         if new_context is not None and not isinstance(new_context, bool):
@@ -1129,7 +1204,7 @@ def handle_request(
                 )
                 state = snapshot["state"]
                 if state == "completed":
-                    text = snapshot.get("result") or "Claude returned no text."
+                    text = _result_with_consultation_metadata(snapshot)
                     is_error = False
                 elif state in ("failed", "timed_out", "cancelled"):
                     text = json.dumps(snapshot, sort_keys=True)
@@ -1142,6 +1217,8 @@ def handle_request(
                     {"content": [{"type": "text", "text": text}], "isError": is_error},
                 )
             options = {"model": model}
+            if effort is not None:
+                options["effort"] = effort
             if include_diff is True or (
                 include_diff is None and _requests_change_context(prompt)
             ):
